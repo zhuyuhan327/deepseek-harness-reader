@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createReader } from '../src/host.js';
-import { parseTranslations, protectMath, restoreMath } from '../src/model.js';
+import { parseTranslations, protectMath, restoreMath, restoreMathTolerant } from '../src/model.js';
 
 const origin = 'http://127.0.0.1:8767';
 
@@ -310,6 +310,27 @@ test('公式占位符保护与回填', () => {
   assert.equal(restoreMath([...markers, markers[0]].join(' '), tokens), null);
   assert.equal(restoreMath(text.replace(markers[0], '[0]'), tokens), null);
   assert.equal(restoreMath(protectMath(source, [], 8).text, tokens), null);
+});
+
+test('占位符被改写时容错回填', () => {
+  const source = 'Noise σ and ϵ are used here.';
+  const { text, tokens } = protectMath(source, [], 3);
+  const marker = tokens[0].marker;
+  const mangled = text.replace(marker, marker.slice(0, -1));
+  assert.equal(restoreMath(mangled, tokens), null);
+  const tolerant = restoreMathTolerant(mangled, tokens);
+  assert.ok(tolerant.includes('ϵ'));
+  assert.ok(!tolerant.includes('⟦'));
+  assert.ok(tolerant.includes('and'));
+});
+
+test('占位符被模型改写时不会整篇失败', async t => {
+  const host = await harness(t);
+  host.setReply(data => JSON.stringify(Object.fromEntries(
+    data.paragraphs.map(p => [p.id, `${p.text.replace('⟧', '')} 的译文`]))));
+  const paper = await host.upload('Mangled markers', 1, ['The noise σ is added at each diffusion step.']);
+  const complete = await host.until(paper.id, 'complete');
+  assert.ok(complete.translations[1].length > 0);
 });
 
 test('保留 PDF 提取标记的行内公式与原有引文', async t => {

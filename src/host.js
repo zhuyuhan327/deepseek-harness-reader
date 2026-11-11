@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  accountRoute, complete, looksComplete, protectMath, ReaderError, restoreMath, QUESTION_PROMPT, selectEvidence,
+  accountRoute, complete, looksComplete, protectMath, ReaderError, restoreMath, restoreMathTolerant, QUESTION_PROMPT, selectEvidence,
   TRANSLATION_PROMPT, translationBatch, parseTranslations,
 } from './model.js';
 import { classifyParagraphs, isTranslatable } from './classify.js';
@@ -427,9 +427,17 @@ export function createReader(ctx, root) {
             const accepted = [];
             for (const [paragraphId, value] of result.values) {
               const tokens = tokensById.get(paragraphId) ?? [];
+              const source = sources.get(paragraphId) ?? '';
               const restored = restoreMath(value, tokens);
-              if (restored === null || !looksComplete(sources.get(paragraphId) ?? '', restored)) continue;
-              accepted.push([paragraphId, restored]);
+              if (restored !== null && (looksComplete(source, restored) || attempt >= 2)) {
+                accepted.push([paragraphId, restored]);
+                continue;
+              }
+              // Two strict attempts already failed for this batch; a third
+              // tolerant restore keeps the paper moving instead of erroring out.
+              if (attempt < 2) continue;
+              const tolerant = restoreMathTolerant(value, tokens);
+              if (tolerant) accepted.push([paragraphId, tolerant]);
             }
             for (const [paragraphId, value] of accepted) translations[paragraphId] = value;
             saved = accepted.length;

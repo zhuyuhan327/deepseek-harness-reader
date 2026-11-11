@@ -164,6 +164,20 @@ export function restoreMath(text, tokens) {
   return valid && index === tokens.length ? restored : null;
 }
 
+/**
+ * Best-effort restore for answers that rewrote a marker (wrong order, missing
+ * closing bracket, dropped marker). Surviving markers are still substituted and
+ * leftovers removed, so one model hiccup cannot fail the whole paper.
+ */
+export function restoreMathTolerant(text, tokens) {
+  const byMarker = new Map(tokens.map(token => [token.marker, token.value]));
+  let output = String(text ?? '');
+  for (const [marker, value] of byMarker) output = output.split(marker).join(value);
+  // Remove only leftovers that still look like our id/index markers; the broad
+  // MATH_MARKER regex would swallow the words that follow a broken marker.
+  return output.replace(/⟦M+:[0-9:]+⟧?/g, '').trim();
+}
+
 // A translation that keeps far fewer sentences than the source has almost
 // certainly dropped a clause; ask for that paragraph again instead of storing it.
 export function looksComplete(source, translated) {
