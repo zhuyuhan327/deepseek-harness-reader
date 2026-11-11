@@ -115,6 +115,22 @@ function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'cache-control': 'no-store' } });
 }
 
+/**
+ * Remove answers that cannot be shown: empty strings and text containing the
+ * Unicode replacement character (a corrupted model answer or transport chunk).
+ * @returns how many entries were dropped.
+ */
+function pruneTranslations(translations) {
+  let removed = 0;
+  for (const [id, value] of Object.entries(translations)) {
+    if (typeof value !== 'string' || !value.trim() || value.includes('\uFFFD')) {
+      delete translations[id];
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 function assertOrigin(request) {
   const site = request.headers.get('sec-fetch-site');
   const origin = request.headers.get('origin');
@@ -169,6 +185,9 @@ export function createReader(ctx, root) {
   async function detail(id) {
     const document = await paper(id);
     const translations = await readJson(join(directory(id), 'translations.json'), {});
+    // Stored answers that carry replacement characters are not shown; dropping
+    // them here makes the paper look unfinished so they get translated again.
+    pruneTranslations(translations);
     const history = await readJson(join(directory(id), 'history.json'), []);
     const translatable = document.paragraphs.filter(paragraph => paragraph.kind !== KIND_SKIP);
     const translatedCount = translatable.filter(paragraph => Object.hasOwn(translations, paragraph.id)).length;
@@ -189,6 +208,7 @@ export function createReader(ctx, root) {
       try {
         const path = join(directory(id), 'translations.json');
         const translations = await readJson(path, {});
+        if (pruneTranslations(translations)) await saveJson(path, translations);
         if (!translationBatch(document.paragraphs, translations).length) return;
         const route = await accountRoute(ctx.llm, lifetime.signal);
         let stalls = 0;

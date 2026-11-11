@@ -172,6 +172,26 @@ window.__ModuleLoader__.load({
       return { left: `${x * 100}%`, top: `${y * 100}%`, width: `${(right - x) * 100}%`, height: `${(bottom - y) * 100}%` };
     }
 
+    function boxArea(box) {
+      return Math.max(0, box[2] - box[0]) * Math.max(0, box[3] - box[1]);
+    }
+
+    function coveredFraction(inner, outer) {
+      const width = Math.min(inner[2], outer[2]) - Math.max(inner[0], outer[0]);
+      const height = Math.min(inner[3], outer[3]) - Math.max(inner[1], outer[1]);
+      if (width <= 0 || height <= 0) return 0;
+      return (width * height) / Math.max(1e-6, boxArea(inner));
+    }
+
+    // PDF text extraction sometimes leaves formula fragments whose boxes sit
+    // inside their paragraph. Painting both would stack two translations on the
+    // same spot, so only the larger paragraph keeps its overlay.
+    function visibleOverlays(paragraphs, translations) {
+      const overlays = paragraphs.filter(p => p.kind !== 'skip' && translations[p.id]);
+      return overlays.filter(p => !overlays.some(q =>
+        q.id !== p.id && boxArea(q.box) > boxArea(p.box) && coveredFraction(p.box, q.box) > 0.6));
+    }
+
     function Translation({ paragraph, text, selected, choose }) {
       const ref = useRef(null);
       useLayoutEffect(() => {
@@ -271,6 +291,7 @@ window.__ModuleLoader__.load({
       }, [pdf, number, zoom]);
       const dimensions = paper.pages[number - 1];
       const paragraphs = paper.paragraphs.filter(p => p.page === number);
+      const overlays = visibleOverlays(paragraphs, paper.translations).filter(p => renderedPage === number);
       const sheetStyle = { aspectRatio: `${dimensions.width} / ${dimensions.height}` };
       return h(React.Fragment, null,
         error && h('p', { className: 'qr-error', role: 'alert' }, error),
@@ -287,7 +308,7 @@ window.__ModuleLoader__.load({
           h('section', null, h('h3', null, '中文译文'),
             h('div', { className: 'qr-sheet', style: sheetStyle },
               h('canvas', { ref: translated, 'aria-label': `译文底图第 ${number} 页` }),
-              ...paragraphs.filter(p => p.kind !== 'skip' && renderedPage === number && paper.translations[p.id]).map(p =>
+              ...overlays.map(p =>
                 h(Translation, { key: p.id, paragraph: p, text: paper.translations[p.id], selected: selected === p.id, choose })))))));
     }
 

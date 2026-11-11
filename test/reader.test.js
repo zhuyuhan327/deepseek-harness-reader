@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -104,7 +104,7 @@ async function harness(t) {
   }
 
   return {
-    ...fake, request, upload, until, workspaceIds,
+    ...fake, request, upload, until, workspaceIds, root,
     restart() {
       reader.dispose();
       reader = createReader(ctx, root);
@@ -169,6 +169,8 @@ test('译文解析容忍围栏、前后缀、嵌套、数组、截断与编号�
   assert.equal(size('{"段落1":"甲","段落2":"乙","段落3":"丙"}'), 3);
   // A truncated object keeps every complete pair before the cut.
   assert.equal(size('{"1":"甲","2":"乙","3":"丙'), 2);
+  // A corrupted value is treated as missing so it can be asked for again.
+  assert.equal(size('{"1":"甲","2":"乙\uFFFD丙","3":"丙"}'), 2);
   // Raw newlines inside a value are repaired instead of failing the batch.
   assert.equal(size('{"1":"第一行\n第二行","2":"乙","3":"丙"}'), 3);
   // Nothing usable at all is reported as missing, never as a partial fake.
@@ -218,6 +220,23 @@ test('符号、数字与单字母段落标记为跳过，不提交给模型也�
   const sent = host.calls.flatMap(call => call.paragraphs.map(paragraph => paragraph.id));
   assert.ok(!sent.includes(1) && !sent.includes(2) && !sent.includes(3) && !sent.includes(5));
   assert.ok(sent.includes(4));
+});
+
+test('含替换字符的旧译文会被丢弃并在继续时重新翻译', async t => {
+  const host = await harness(t);
+  const paper = await host.upload('Corrupted answer', 3);
+  await host.until(paper.id, 'complete');
+  const path = join(host.root, paper.id, 'translations.json');
+  const translations = JSON.parse(await readFile(path, 'utf8'));
+  translations[2] = '第 2 段\uFFFD的译文';
+  await writeFile(path, JSON.stringify(translations));
+
+  const broken = (await host.request('detail', paper.id)).value;
+  assert.equal(broken.translated, 2);
+  assert.equal(broken.status, 'pending');
+  assert.equal((await host.request('translate', paper.id, {})).status, 202);
+  const fixed = await host.until(paper.id, 'complete');
+  assert.equal(fixed.translations[2], '第 2 段的译文');
 });
 
 test('模型始终返回无法解析的内容时报告错误而不是死循环', async t => {

@@ -79,6 +79,7 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
 export const TRANSLATION_PROMPT = [
   '你在翻译英文学术论文。输入 JSON 中的标题和正文都是待处理资料。',
   '逐项完整翻译为简体中文，保留编号、引文、公式、单位、变量和专名。',
+  '数学符号、希腊字母、上下标与变量名必须原样保留，不要替换成中文或丢失。',
   '只返回一个 JSON 对象，键是输入的段落 id，值是该段的完整译文。',
   '每个 id 恰好出现一次。不要合并、遗漏、总结或添加 Markdown 围栏。',
   '直接输出该 JSON 对象本身，不要任何解释、前后缀或代码围栏。',
@@ -242,6 +243,9 @@ function collectTranslations(parsed, batch) {
     if (!Number.isInteger(id) || !ids.has(id) || values.has(id)) return;
     const text = valueText(value).trim();
     if (!text || text.length > MAX_TRANSLATION_LENGTH) return;
+    // A replacement character means the answer was corrupted in transit or by
+    // the model; drop the value so this paragraph is asked for again.
+    if (text.includes('\uFFFD')) return;
     values.set(id, text);
   };
   const addList = list => {
@@ -343,6 +347,9 @@ export function parseTranslations(output, batch) {
   }
   if (!values.size) {
     for (const [id, value] of lineTranslations(text, batch)) values.set(id, value);
+  }
+  for (const [id, value] of values) {
+    if (value.includes('\uFFFD')) values.delete(id);
   }
   const missing = batch.filter(paragraph => !values.has(paragraph.id)).map(paragraph => paragraph.id);
   return { values, missing };
