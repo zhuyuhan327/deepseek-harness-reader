@@ -187,16 +187,19 @@ export function looksComplete(source, translated) {
   // A clipped answer often starts mid-formula ("= 1 e− 4}。…") while its source
   // starts with a word; identical leading symbols are legitimate.
   if (/^[=,;:.)\]}】]/.test(out) && !/^[=,;:.)\]}】]/.test(src)) return false;
+  const sentences = (src.match(/[.!?](?=\s|$)/g) ?? []).length;
+  const target = (out.match(/[。！？]/g) ?? []).length;
+  // A concise Chinese answer keeps the source's sentence count even when its
+  // character count is well below a quarter of the English text.
+  if (sentences >= 2 && target >= Math.max(1, Math.ceil(sentences * 0.6))) return true;
   // Chinese is normally 0.3–0.7× the length of its English source; far less
   // than that means most of the paragraph was dropped.
   if (src.length >= 120 && out.length / src.length < 0.25) return false;
-  const sentences = (src.match(/[.!?](?=\s|$)/g) ?? []).length;
   if (sentences < 3) return true;
   // Formula-heavy paragraphs count periods inside numbers as sentences, so the
   // sentence rule only applies to prose.
   const letters = (src.match(/[A-Za-z]/g) ?? []).length;
   if (letters / src.length <= 0.6 || /[=∈∉⊂⊃≤≥∑∏∫√∞∂∇]/.test(src)) return true;
-  const target = (out.match(/[。！？]/g) ?? []).length;
   return target >= Math.max(1, Math.ceil(sentences * 0.6));
 }
 

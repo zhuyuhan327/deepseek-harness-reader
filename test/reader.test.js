@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createReader } from '../src/host.js';
-import { parseTranslations, protectMath, restoreMath, restoreMathTolerant } from '../src/model.js';
+import { looksComplete, parseTranslations, protectMath, restoreMath, restoreMathTolerant } from '../src/model.js';
 
 const origin = 'http://127.0.0.1:8767';
 
@@ -310,6 +310,14 @@ test('公式占位符保护与回填', () => {
   assert.equal(restoreMath([...markers, markers[0]].join(' '), tokens), null);
   assert.equal(restoreMath(text.replace(markers[0], '[0]'), tokens), null);
   assert.equal(restoreMath(protectMath(source, [], 8).text, tokens), null);
+});
+
+test('简洁但完整的译文不会被误判为截断', () => {
+  const source = 'where the second term acts as a regularizer, discouraging the network from fitting sharp, high-frequency fluctuations. The derivation of this expansion is provided in section C.1.';
+  const translated = '其中第二项充当正则化项，抑制网络拟合尖锐的高频波动。此展开的推导见第 C.1 节。';
+  assert.equal(looksComplete(source, translated), true);
+  // A clipped answer that starts mid-formula is still rejected.
+  assert.equal(looksComplete(source, '= 1 e− 4}。'), false);
 });
 
 test('占位符被改写时容错回填', () => {
