@@ -48,15 +48,6 @@ dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz
 
 已把 `dsh` 加入 PATH 时可以直接执行 `dsh plugin --profile desktop add "link:$readerPath"`。使用 Harness 的 Web profile 时，把 `--profile desktop` 换成 `--profile web`。
 
-## 打包发布
-
-```powershell
-node --test
-pnpm pack
-```
-
-生成的 `dsh-quiet-reader-<version>.tgz` 可以用 `dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz` 安装。发布到别处时请确认 `package.json` 的 `files` 覆盖 `src`、`cordis.patch.yml`、`README.md` 与 `LICENSE`。
-
 ## 使用
 
 1. 在「阅读模式」上传 PDF。同一文件再次上传会复用该文献的工作区和已有译文。
@@ -74,6 +65,8 @@ node --test
 ```
 
 测试覆盖：全文翻译断网续译、重复导入复用工作区、问答隔离、译文围栏/截断/数组/编号列表容错、不可解析输出时的失败路径，以及宿主拒绝跨站请求。
+
+维护者发版：运行 `pnpm pack` 生成 `dsh-quiet-reader-<version>.tgz`，作为 GitHub Release 的附件上传。
 
 ## 许可证
 
