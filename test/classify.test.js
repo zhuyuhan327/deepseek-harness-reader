@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyParagraphs, looksLikeMath } from '../src/classify.js';
+import { classifyParagraphs, isTranslatable, looksLikeMath } from '../src/classify.js';
 
 const paragraph = (id, page, box, text) => ({ id, page, box, text });
 
@@ -24,11 +24,11 @@ test('分类：正文与图表注释翻译，页眉、公式、参考文献与�
     paragraph(16, 5, [0.2, 0.6, 0.8, 0.63], 'Table 2: Comparison of reconstruction quality across methods.'),
   ];
   assert.deepEqual(classifyParagraphs(paragraphs), [
-    'text', 'skip', 'skip', 'text', 'skip',
-    'caption', 'skip', 'text',
+    'heading', 'skip', 'heading', 'text', 'skip',
+    'caption', 'formula', 'text',
     'skip', 'skip', 'skip',
     'skip', 'skip',
-    'text', 'text',
+    'heading', 'text',
     'caption',
   ]);
 });
@@ -39,4 +39,72 @@ test('数学行与普通句子的区分', () => {
   assert.equal(looksLikeMath('0.85 0.90 0.75 0.80 0.93'), true);
   assert.equal(looksLikeMath('where A is the Moore-Penrose pseudoinverse of A.'), false);
   assert.equal(looksLikeMath('The method improves PSNR by 2 dB on average.'), false);
+  assert.equal(looksLikeMath('Let x = y + z.'), false);
+  assert.equal(looksLikeMath('When θ ≤ 0, set x = 0.'), false);
+});
+
+test('标题按字号与粗体识别，正文与图注仍按原规则分类', () => {
+  const p = (id, box, text, style) => ({ id, page: 1, box, text, ...(style ? { style } : {}) });
+  const paragraphs = [
+    p(1, [0.2, 0.1, 0.8, 0.14], 'Self-diffusion for Solving Inverse Problems', { size: 14.3, bold: true, align: 'center' }),
+    p(2, [0.45, 0.17, 0.55, 0.19], 'Abstract', { size: 14.3, bold: true, align: 'left' }),
+    p(3, [0.18, 0.2, 0.82, 0.4], 'We propose a novel framework for solving inverse problems in imaging.', { size: 10, bold: false, align: 'left' }),
+    p(4, [0.18, 0.45, 0.82, 0.5], 'Figure 1: Demonstration of self-diffusion applied to inverse problems.', { size: 10, bold: false, align: 'left' }),
+    p(5, [0.18, 0.55, 0.82, 0.58], 'where A is a known forward operator and x is the unknown solution.', { size: 10, bold: false, align: 'left' }),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['heading', 'heading', 'text', 'caption', 'text']);
+});
+
+test('布局区域识别图中文字和表格单元，图表注释及区域外正文照常翻译', () => {
+  const paragraphs = [
+    paragraph(1, 4, [0.14, 0.21, 0.28, 0.23], 'Ground truth'),
+    paragraph(2, 4, [0.14, 0.32, 0.65, 0.35], 'Figure 2: Results on the test images.'),
+    paragraph(3, 4, [0.14, 0.38, 0.65, 0.41], 'Figure 2 shows the reconstruction quality.'),
+    paragraph(4, 4, [0.17, 0.52, 0.22, 0.54], 'PSNR'),
+    paragraph(5, 4, [0.18, 0.59, 0.65, 0.62], 'Table II. Image reconstruction results.'),
+    paragraph(6, 4, [0.18, 0.72, 0.65, 0.75], 'DDRM 23.5 0.68 0.18'),
+    paragraph(7, 4, [0.18, 0.79, 0.65, 0.82], 'x = A y + z'),
+    paragraph(8, 5, [0.14, 0.21, 0.65, 0.23], 'The method uses a better image prior.'),
+  ];
+  const regions = [
+    { page: 4, kind: 'figure', box: [0.12, 0.18, 0.75, 0.36] },
+    { page: 4, kind: 'table', box: [0.12, 0.46, 0.75, 0.58] },
+  ];
+  const kinds = classifyParagraphs(paragraphs, regions);
+  assert.deepEqual(kinds, ['figure', 'caption', 'text', 'table', 'caption', 'table', 'formula', 'text']);
+  assert.deepEqual(kinds.map(kind => isTranslatable(kind)), [false, true, true, false, true, false, false, true]);
+  assert.equal(isTranslatable(undefined), true);
+  assert.equal(isTranslatable('skip'), false);
+});
+
+test('页码范围首段保持正文，跨页重复正文保留，页眉按位置过滤', () => {
+  const pages = [2, 3, 4];
+  const paragraphs = pages.flatMap((page, index) => [
+    paragraph(index * 3 + 1, page, [0.14, 0.08, 0.66, 0.10], 'Under review as a conference paper at ICLR 2025'),
+    paragraph(index * 3 + 2, page, [0.14, 0.32, 0.66, 0.36], 'The method retains the original sample'),
+    paragraph(index * 3 + 3, page, [0.14, 0.38, 0.66, 0.42], 'We compare PSNR SSIM and LPIPS'),
+  ]);
+  assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'text', 'text', 'skip', 'text', 'text', 'skip', 'text', 'text']);
+  assert.deepEqual(classifyParagraphs([paragraphs[1]]), ['text']);
+});
+
+test('文中编号引文可翻译，参考文献之后的多级附录恢复翻译', () => {
+  const paragraphs = [
+    paragraph(1, 8, [0.15, 0.10, 0.82, 0.13], '[1] introduced the estimator used in our experiments.'),
+    paragraph(2, 8, [0.15, 0.30, 0.82, 0.33], '4.2 References'),
+    paragraph(3, 8, [0.15, 0.34, 0.82, 0.37], '[1] Author. An Estimator. (2023).'),
+    paragraph(4, 9, [0.15, 0.10, 0.82, 0.13], 'A.1 Error Propagation'),
+    paragraph(5, 9, [0.15, 0.14, 0.82, 0.17], 'The error depends on the denoising model.'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'skip', 'skip', 'heading', 'text']);
+});
+
+test('粗体附录编号拆成独立文本块时仍退出参考文献，并保留编号正文', () => {
+  const paragraphs = [
+    paragraph(1, 8, [0.15, 0.30, 0.82, 0.33], 'References'),
+    { ...paragraph(5, 9, [0.15, 0.10, 0.17, 0.12], 'A'), style: { bold: true, size: 12 } },
+    { ...paragraph(4, 9, [0.19, 0.10, 0.82, 0.12], 'Error Propagation'), style: { bold: true, size: 12 } },
+    paragraph(3, 9, [0.15, 0.14, 0.82, 0.17], '1. We establish the equation x = y + z'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'skip', 'heading', 'text']);
 });

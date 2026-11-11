@@ -59,112 +59,57 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function combinePageText(pdfjs, viewport, items, number) {
-      const runs = [];
-      for (const item of items) {
-        if (typeof item.str !== 'string' || !item.str.trim()) continue;
-        const matrix = pdfjs.Util.transform(viewport.transform, item.transform);
-        const height = Math.hypot(matrix[2], matrix[3]);
-        if (height < 1 || !Number.isFinite(matrix[4]) || !Number.isFinite(matrix[5])) continue;
-        const x = matrix[4];
-        const baseline = matrix[5];
-        runs.push({
-          text: item.str.trim(), x, right: x + Math.max(item.width, height / 3),
-          baseline, top: baseline - height * .86, bottom: baseline + height * .22, height,
-        });
-      }
-      runs.sort((a, b) => a.baseline - b.baseline || a.x - b.x);
-      const rows = [];
-      for (const run of runs) {
-        const row = rows.at(-1);
-        if (row && Math.abs(row.baseline - run.baseline) <= 2) row.items.push(run);
-        else rows.push({ baseline: run.baseline, items: [run] });
-      }
-      const lines = [];
-      for (const row of rows) {
-        row.items.sort((a, b) => a.x - b.x);
-        let line;
-        for (const run of row.items) {
-          const gap = line ? run.x - line.right : Infinity;
-          if (line && gap <= Math.max(8, run.height * 1.25)) {
-            if (run.text === line.text && Math.abs(run.x - line.x) < .2) continue;
-            line.text += gap < run.height * .13 && !/^[\p{Letter}\p{Number}]/u.test(run.text) ? run.text : ' ' + run.text;
-            line.right = Math.max(line.right, run.right);
-            line.top = Math.min(line.top, run.top);
-            line.bottom = Math.max(line.bottom, run.bottom);
-          } else {
-            line = { ...run };
-            lines.push(line);
-          }
-        }
-      }
-      const blocks = [];
-      for (const line of lines) {
-        let match;
-        for (let i = blocks.length - 1; i >= 0; i--) {
-          const block = blocks[i];
-          const gap = line.top - block.bottom;
-          if (gap < -.4 || gap > line.height * .7) continue;
-          const overlap = Math.min(line.right, block.right) - Math.max(line.x, block.x);
-          if (Math.abs(line.x - block.lastX) <= line.height * 1.25 &&
-              overlap > Math.min(line.right - line.x, block.right - block.x) * .55 &&
-              Math.abs(line.height - block.height) < 2 &&
-              !/^[•▪●]/.test(line.text) && block.text.length + line.text.length < 2200) {
-            match = block;
-            break;
-          }
-        }
-        if (match) {
-          match.text += ' ' + line.text;
-          match.bottom = line.bottom;
-          match.right = Math.max(match.right, line.right);
-          match.x = Math.min(match.x, line.x);
-          match.lastX = line.x;
-        } else {
-          blocks.push({ ...line, lastX: line.x });
-        }
-      }
-      const clamp = n => Math.min(1, Math.max(0, n));
-      return blocks.map(block => ({
-        page: number, text: block.text,
-        box: [block.x / viewport.width, block.top / viewport.height,
-          block.right / viewport.width, block.bottom / viewport.height].map(clamp),
-      })).filter(p => p.box[2] > p.box[0] && p.box[3] > p.box[1]);
-    }
+    let layoutLibrary;
+    let presentationLibrary;
+    let exportLibrary;
+    const loadLayout = () => layoutLibrary ??= import(endpoint('asset', { name: 'layout.js' })).catch(error => {
+      layoutLibrary = undefined;
+      throw error;
+    });
+    const loadPresentation = () => presentationLibrary ??= import(endpoint('asset', { name: 'presentation.js' })).catch(error => {
+      presentationLibrary = undefined;
+      throw error;
+    });
+    const loadExporter = () => exportLibrary ??= import(endpoint('asset', { name: 'pdf-export.js' })).catch(error => {
+      exportLibrary = undefined;
+      throw error;
+    });
 
-    async function parseFile(file, report) {
-      if (!file || file.size === 0 || file.size > PDF_LIMIT) {
-        throw new Error(`请选择 ${PDF_LIMIT_MB} MB 以内的 PDF。`);
+    async function parseDocument(handle, report, range, filename) {
+      const total = handle.document.numPages;
+      if (total > 150) throw new Error('第一版支持 150 页以内的 PDF。');
+      const first = range?.first ?? 1;
+      const last = range?.last ?? total;
+      if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first || last > total) {
+        throw new Error(`页码范围需在 1–${total} 之间，且起始页不大于结束页。`);
       }
-      let handle;
-      try {
-        handle = await openPdf(new Uint8Array(await file.arrayBuffer()));
-        if (handle.document.numPages > 150) throw new Error('第一版支持 150 页以内的 PDF。');
-        const pages = [];
-        const paragraphs = [];
-        let chars = 0;
-        for (let page = 1; page <= handle.document.numPages; page++) {
-          report(`正在提取第 ${page} / ${handle.document.numPages} 页`);
-          const current = await handle.document.getPage(page);
-          const viewport = current.getViewport({ scale: 1 });
-          pages.push({ width: viewport.width, height: viewport.height });
-          const text = await current.getTextContent();
-          for (const paragraph of combinePageText(handle.pdfjs, viewport, text.items, page)) {
+      const pages = [];
+      const paragraphs = [];
+      const regions = [];
+      const { extractPageLayout } = await loadLayout();
+      let chars = 0;
+      for (let page = 1; page <= total; page++) {
+        if (page >= first && page <= last) report(`正在识别第 ${page} / ${last} 页的版面`);
+        const current = await handle.document.getPage(page);
+        const viewport = current.getViewport({ scale: 1 });
+        pages.push({ width: viewport.width, height: viewport.height });
+        if (page >= first && page <= last) {
+          const layout = await extractPageLayout(handle.pdfjs, current, viewport, page);
+          regions.push(...layout.regions.map(region => ({ ...region, page })));
+          for (const paragraph of layout.paragraphs) {
             if (paragraph.text.length > 2400) throw new Error('存在过长文本行，请拆分或重新导出 PDF。');
             paragraphs.push({ id: paragraphs.length + 1, ...paragraph });
             chars += paragraph.text.length;
           }
-          current.cleanup();
-          if (chars > 600_000 || paragraphs.length > 2500) throw new Error('文献文字过多，请拆分 PDF。');
         }
-        if (!paragraphs.length) throw new Error('这份 PDF 未提取到文字。请上传可选中文本的 PDF。');
-        const metadata = await handle.document.getMetadata().catch(() => ({}));
-        const embeddedTitle = metadata.info?.Title;
-        const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || file.name.replace(/\.pdf$/i, '');
-        return { title, pages, paragraphs };
-      } finally {
-        await handle?.task.destroy();
+        current.cleanup();
+        if (chars > 600_000 || paragraphs.length > 2500) throw new Error('文献文字过多，请拆分 PDF。');
       }
+      if (!paragraphs.length) throw new Error('所选页码范围未提取到文字。请换一页或上传可选中文本的 PDF。');
+      const metadata = await handle.document.getMetadata().catch(() => ({}));
+      const embeddedTitle = metadata.info?.Title;
+      const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || String(filename ?? 'paper').replace(/\.pdf$/i, '');
+      return { title, pages, paragraphs, regions, layoutVersion: 1, range: { first, last } };
     }
 
     function place(box) {
@@ -172,144 +117,220 @@ window.__ModuleLoader__.load({
       return { left: `${x * 100}%`, top: `${y * 100}%`, width: `${(right - x) * 100}%`, height: `${(bottom - y) * 100}%` };
     }
 
-    function boxArea(box) {
-      return Math.max(0, box[2] - box[0]) * Math.max(0, box[3] - box[1]);
+    function canvasToJpeg(canvas) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob(blob => {
+          if (!blob) { reject(new Error('无法生成页面图片。')); return; }
+          blob.arrayBuffer().then(buffer => resolve({
+            bytes: new Uint8Array(buffer), jpegWidth: canvas.width, jpegHeight: canvas.height,
+          })).catch(reject);
+        }, 'image/jpeg', 0.96);
+      });
     }
 
-    function coveredFraction(inner, outer) {
-      const width = Math.min(inner[2], outer[2]) - Math.max(inner[0], outer[0]);
-      const height = Math.min(inner[3], outer[3]) - Math.max(inner[1], outer[1]);
-      if (width <= 0 || height <= 0) return 0;
-      return (width * height) / Math.max(1e-6, boxArea(inner));
+    async function sourceTextLines(pdfjs, page, viewport) {
+      const { items } = await page.getTextContent();
+      return items.flatMap(item => {
+        if (!item.str?.trim() || !item.transform || !(item.width > 0)) return [];
+        const [a, b, c, d, x, y] = pdfjs.Util.transform(viewport.transform, item.transform);
+        if (a <= 0 || Math.abs(b) > a * .2) return [];
+        return [{ text: item.str, x, y, width: item.width, size: Math.hypot(c, d) }];
+      });
     }
 
-    // PDF text extraction sometimes leaves formula fragments whose boxes sit
-    // inside their paragraph. Painting both would stack two translations on the
-    // same spot, so only the larger paragraph keeps its overlay.
-    function visibleOverlays(paragraphs, translations) {
-      const overlays = paragraphs.filter(p => p.kind !== 'skip' && translations[p.id]);
-      return overlays.filter(p => !overlays.some(q =>
-        q.id !== p.id && boxArea(q.box) > boxArea(p.box) && coveredFraction(p.box, q.box) > 0.6));
-    }
-
-    function Translation({ paragraph, text, selected, choose }) {
-      const ref = useRef(null);
-      useLayoutEffect(() => {
-        const block = ref.current;
-        const measure = () => {
-          const { width, height } = block.getBoundingClientRect();
-          if (width <= 0 || height <= 0) return;
-          let low = .05;
-          let high = Math.max(width, height);
-          const lineBox = block.firstElementChild;
-          for (let i = 0; i < 17; i++) {
-            const size = (low + high) / 2;
-            block.style.fontSize = size + 'px';
-            if (lineBox.getBoundingClientRect().height <= height && lineBox.scrollWidth <= Math.ceil(width)) low = size;
-            else high = size;
+    async function buildPdf(paper, mode, report) {
+      const first = paper.range?.first ?? 1;
+      const last = paper.range?.last ?? paper.pages.length;
+      if (mode !== 'original' && !paper.translated) throw new Error('这篇文献还没有可导出的译文。');
+      const response = await fetch(endpoint('pdf', { id: paper.id }));
+      if (!response.ok) throw new Error('无法读取原始 PDF。');
+      const data = new Uint8Array(await response.arrayBuffer());
+      if (mode === 'original' && first === 1 && last === paper.pages.length) return data;
+      const [{ paintTranslation }, { buildJpegPdf }] = await Promise.all([loadPresentation(), loadExporter()]);
+      await document.fonts?.ready;
+      const handle = await openPdf(data);
+      const pages = [];
+      const source = document.createElement('canvas');
+      const translated = document.createElement('canvas');
+      const spread = document.createElement('canvas');
+      try {
+        for (let number = first; number <= last; number++) {
+          report(`正在排版第 ${number} / ${last} 页`);
+          const page = await handle.document.getPage(number);
+          const base = page.getViewport({ scale: 1 });
+          const viewport = page.getViewport({ scale: Math.min(3, 2100 / Math.max(base.width, base.height)) });
+          source.width = Math.ceil(viewport.width);
+          source.height = Math.ceil(viewport.height);
+          try {
+            await page.render({ canvas: source, viewport }).promise;
+            let output = source;
+            let textLines;
+            if (mode !== 'original') {
+              const paragraphs = paper.paragraphs.filter(p => p.page === number);
+              const regions = (paper.regions ?? []).filter(region => region.page === number);
+              textLines = paintTranslation(translated, source, base, paragraphs, paper.translations, regions);
+              output = translated;
+            }
+            if (mode === 'bilingual') {
+              spread.width = source.width * 2;
+              spread.height = source.height;
+              const ctx = spread.getContext('2d');
+              ctx.drawImage(source, 0, 0);
+              ctx.drawImage(translated, source.width, 0);
+              textLines = [
+                ...await sourceTextLines(handle.pdfjs, page, base),
+                ...textLines.map(line => ({ ...line, x: line.x + base.width })),
+              ];
+              output = spread;
+            } else if (mode === 'original') {
+              textLines = await sourceTextLines(handle.pdfjs, page, base);
+            }
+            pages.push({
+              ...await canvasToJpeg(output),
+              width: base.width * (mode === 'bilingual' ? 2 : 1), height: base.height,
+              textLines,
+            });
+          } finally {
+            for (const canvas of [source, translated, spread]) canvas.width = canvas.height = 0;
+            page.cleanup();
           }
-          block.style.fontSize = Math.floor(low * 100) / 100 + 'px';
-        };
-        measure();
-        const observer = new ResizeObserver(measure);
-        observer.observe(block);
-        return () => observer.disconnect();
-      }, [text]);
-      return h('div', {
-        ref, className: 'qr-translation' + (selected ? ' qr-selected' : ''), style: place(paragraph.box),
-        onClick: () => choose(paragraph.id),
-      }, h('span', null, text));
+        }
+        return buildJpegPdf(pages);
+      } finally {
+        await handle.task.destroy();
+      }
+    }
+
+    function downloadPdf(bytes, filename) {
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    const retainedKinds = {
+      formula: '公式',
+      table: '表格',
+      figure: '图片或图内文字',
+      skip: '原文内容',
+    };
+
+    function Reflow({ paper, number, selected, choose, zoom }) {
+      const target = useRef(null);
+      useEffect(() => {
+        if (selected != null) target.current?.scrollIntoView({ block: 'nearest' });
+      }, [selected, number]);
+      const rows = paper.paragraphs.filter(p => p.page === number);
+      return h('section', { className: 'qr-reflow', style: { fontSize: `${zoom / 100}em` } },
+        h('h3', { className: 'qr-reflow-page' }, `第 ${number} 页`),
+        ...rows.map(paragraph => {
+          if (retainedKinds[paragraph.kind] && paragraph.kind !== 'formula') return null;
+          const translated = paper.translations[paragraph.id];
+          return h('article', {
+            key: paragraph.id, ref: paragraph.id === selected ? target : null,
+            className: `qr-pair ${paragraph.kind}`,
+          },
+          h('button', {
+            type: 'button', className: 'qr-reflow-select', onClick: () => choose(paragraph.id),
+            'aria-pressed': paragraph.id === selected,
+          }, `段落 ${paragraph.id}`),
+          h('p', { className: paragraph.kind === 'formula' ? 'qr-reflow-formula' : 'qr-en' }, paragraph.text),
+          paragraph.kind !== 'formula' &&
+            h('p', { className: translated ? 'qr-zh' : 'qr-zh qr-pending' }, translated ?? '（待翻译）'));
+        }));
     }
 
     function Pages({ paper, number, selected, choose, zoom }) {
       const original = useRef(null);
       const translated = useRef(null);
       const [pdf, setPdf] = useState(null);
-      const [renderedPage, setRenderedPage] = useState(0);
+      const [renderer, setRenderer] = useState(null);
+      const [rendered, setRendered] = useState(null);
       const [error, setError] = useState('');
-      const shownNumber = useRef(number);
-      // Hidden translations belong to the page that finished rasterising; only a
-      // page change resets that marker, so zooming keeps the current overlay.
-      useEffect(() => {
-        if (shownNumber.current !== number) {
-          shownNumber.current = number;
-          setRenderedPage(0);
-        }
-      }, [number]);
       useEffect(() => {
         const abort = new AbortController();
         let handle;
-        setPdf(null);
-        setError('');
         void (async () => {
           try {
             const response = await fetch(endpoint('pdf', { id: paper.id }), { signal: abort.signal });
             if (!response.ok) throw new Error('无法读取原始 PDF。');
+            const presentation = await loadPresentation();
             handle = await openPdf(new Uint8Array(await response.arrayBuffer()));
-            if (abort.signal.aborted) await handle.task.destroy();
-            else setPdf(handle.document);
+            await document.fonts?.ready;
+            if (abort.signal.aborted) return;
+            setRenderer(presentation);
+            setPdf(handle.document);
           } catch {
             if (!abort.signal.aborted) setError('原版页面加载失败，请切换文献后重试。');
+          } finally {
+            if (abort.signal.aborted && handle) await handle.task.destroy().catch(() => {});
           }
         })();
-        return () => { abort.abort(); if (handle) void handle.task.destroy(); };
+        return () => { abort.abort(); if (handle) void handle.task.destroy().catch(() => {}); };
       }, [paper.id]);
       useEffect(() => {
         if (!pdf) return;
         let cancelled = false;
         let rendering;
         const source = original.current;
-        const copy = translated.current;
-        for (const canvas of [source, copy]) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-        // A private canvas prevents a cancelled render from racing a new page.
         const raster = document.createElement('canvas');
         void (async () => {
+          let page;
           try {
-            const page = await pdf.getPage(number);
+            page = await pdf.getPage(number);
             if (cancelled) return;
             const base = page.getViewport({ scale: 1 });
             const longest = Math.max(base.width, base.height);
-            // Rasterise at the displayed size so enlarged pages stay sharp.
-            const viewport = page.getViewport({ scale: Math.min(3, (1700 * zoom) / 100 / longest) });
+            const viewport = page.getViewport({ scale: Math.min(4, (1700 * zoom) / 100 / longest) });
             raster.width = Math.ceil(viewport.width);
             raster.height = Math.ceil(viewport.height);
             rendering = page.render({ canvas: raster, viewport });
             await rendering.promise;
             if (cancelled) return;
-            for (const canvas of [source, copy]) {
-              canvas.width = raster.width;
-              canvas.height = raster.height;
-              canvas.getContext('2d').drawImage(raster, 0, 0);
-            }
-            setRenderedPage(number);
+            source.width = raster.width;
+            source.height = raster.height;
+            source.getContext('2d').drawImage(raster, 0, 0);
+            setRendered({ number });
             setError('');
           } catch {
             if (!cancelled) setError('当前页渲染失败。');
+          } finally {
+            raster.width = raster.height = 0;
+            page?.cleanup();
           }
         })();
         return () => { cancelled = true; rendering?.cancel(); };
       }, [pdf, number, zoom]);
       const dimensions = paper.pages[number - 1];
       const paragraphs = paper.paragraphs.filter(p => p.page === number);
-      const overlays = visibleOverlays(paragraphs, paper.translations).filter(p => renderedPage === number);
+      const regions = (paper.regions ?? []).filter(region => region.page === number);
+      const ready = rendered?.number === number;
+      useLayoutEffect(() => {
+        if (ready && renderer && dimensions) {
+          renderer.paintTranslation(translated.current, original.current, dimensions, paragraphs, paper.translations, regions);
+        }
+      }, [rendered, renderer, number, paper]);
+      if (!dimensions) return null;
       const sheetStyle = { aspectRatio: `${dimensions.width} / ${dimensions.height}` };
+      const paragraphButton = p => h('button', {
+        type: 'button', key: p.id, className: 'qr-source' + (selected === p.id ? ' qr-selected' : ''),
+        style: place(p.box), title: `查看第 ${p.id} 段`, 'aria-label': `选择段落 ${p.id}`,
+        'aria-pressed': selected === p.id, onClick: () => choose(p.id),
+      });
       return h(React.Fragment, null,
         error && h('p', { className: 'qr-error', role: 'alert' }, error),
         h('div', { className: 'qr-viewport' },
           h('div', { className: 'qr-spread', style: { width: `${zoom}%` } },
-          h('section', null, h('h3', null, '英文原文'),
-            h('div', { className: 'qr-sheet', style: sheetStyle },
-              h('canvas', { ref: original, 'aria-label': `原文第 ${number} 页` }),
-              ...paragraphs.map(p => h('button', {
-                type: 'button', key: p.id, className: 'qr-source' + (selected === p.id ? ' qr-selected' : ''),
-                style: place(p.box), title: `选中段落 ${p.id}`, 'aria-label': `选择段落 ${p.id}`,
-                onClick: () => choose(p.id),
-              })))),
-          h('section', null, h('h3', null, '中文译文'),
-            h('div', { className: 'qr-sheet', style: sheetStyle },
-              h('canvas', { ref: translated, 'aria-label': `译文底图第 ${number} 页` }),
-              ...overlays.map(p =>
-                h(Translation, { key: p.id, paragraph: p, text: paper.translations[p.id], selected: selected === p.id, choose })))))));
+            h('section', null, h('h3', null, '英文原文'),
+              h('div', { className: 'qr-sheet', style: sheetStyle },
+                h('canvas', { ref: original, style: { visibility: ready ? 'visible' : 'hidden' }, 'aria-label': `原文第 ${number} 页` }),
+                ...(ready ? paragraphs.map(paragraphButton) : []))),
+            h('section', null, h('h3', null, '中文译文'),
+              h('div', { className: 'qr-sheet', style: sheetStyle },
+                h('canvas', { ref: translated, style: { visibility: ready ? 'visible' : 'hidden' }, 'aria-label': `译文第 ${number} 页` }),
+                ...(ready ? paragraphs.filter(p => paper.translations[p.id]).map(paragraphButton) : []))))));
     }
 
     function apply(ctx) {
@@ -324,8 +345,12 @@ window.__ModuleLoader__.load({
         listeners.add(listener);
         return () => listeners.delete(listener);
       };
-      function ReaderPanel() {
+      function ReaderPanel(props) {
         const id = useSyncExternalStore(subscribe, () => selectedPaper);
+        const useWorkspaces = props && typeof props.useWorkspaces === 'function' ? props.useWorkspaces : null;
+        const useSession = props && typeof props.useSession === 'function' ? props.useSession : null;
+        const workspaceState = useWorkspaces ? useWorkspaces(state => state) : null;
+        const sessionState = useSession ? useSession(state => state ?? null) : null;
         const [library, setLibrary] = useState([]);
         const [paper, setPaper] = useState(null);
         const [number, setNumber] = useState(1);
@@ -335,6 +360,13 @@ window.__ModuleLoader__.load({
         const [busy, setBusy] = useState('');
         const [asking, setAsking] = useState(false);
         const [revision, setRevision] = useState(0);
+        const [pending, setPending] = useState(null);
+        const [fromPage, setFromPage] = useState('');
+        const [toPage, setToPage] = useState('');
+        const [exportOpen, setExportOpen] = useState(false);
+        const [exportMode, setExportMode] = useState('bilingual');
+        const [exporting, setExporting] = useState(false);
+        const [viewMode, setViewMode] = useState('overlay');
         const [zoom, setZoom] = useState(() => {
           try {
             const stored = Number(localStorage.getItem('dsh-quiet-reader:zoom'));
@@ -344,6 +376,9 @@ window.__ModuleLoader__.load({
         const file = useRef(null);
         const active = useRef('');
         active.current = id;
+        useEffect(() => () => {
+          if (pending) void pending.handle.task.destroy().catch(() => {});
+        }, [pending]);
         useEffect(() => {
           const controller = new AbortController();
           void refresh(controller.signal).then(setLibrary).catch(e => {
@@ -351,6 +386,30 @@ window.__ModuleLoader__.load({
           });
           return () => controller.abort();
         }, []);
+        // Workspaces added or removed in the DSH sidebar show up here: refresh
+        // the library, follow the selected workspace, and drop a paper whose
+        // workspace disappeared.
+        useEffect(() => {
+          if (!workspaceState) return;
+          let cancelled = false;
+          void refresh().then(items => {
+            if (cancelled) return;
+            setLibrary(items);
+            const items2 = workspaceState.items ?? [];
+            const sessionId = sessionState?.sessionId ?? sessionState?.id;
+            const workspace = sessionId !== undefined
+              ? items2.find(item => (item.sessionIds ?? []).includes(sessionId))
+              : undefined;
+            if (workspace) {
+              const match = items.find(item => item.workspaceId === workspace.workspaceId);
+              if (match && match.id !== selectedPaper) choosePaper(match.id);
+            }
+            if (selectedPaper && !items.some(item => item.id === selectedPaper)) {
+              choosePaper('');
+            }
+          }).catch(() => {});
+          return () => { cancelled = true; };
+        }, [workspaceState, sessionState]);
         useEffect(() => {
           setPaper(null);
           setNumber(1);
@@ -380,24 +439,92 @@ window.__ModuleLoader__.load({
           return () => { controller.abort(); clearTimeout(timer); };
         }, [id, revision]);
 
-        async function upload(event) {
+        async function chooseFile(event) {
           const chosen = event.currentTarget.files[0];
           event.currentTarget.value = '';
           if (!chosen || busy) return;
+          if (chosen.size === 0 || chosen.size > PDF_LIMIT) {
+            setError(`请选择 ${PDF_LIMIT_MB} MB 以内的 PDF。`);
+            return;
+          }
           setError('');
           setBusy('正在读取 PDF');
           try {
-            const document = await parseFile(chosen, setBusy);
-            setBusy('正在创建文献工作区');
-            const form = new FormData();
-            form.set('pdf', chosen);
-            form.set('document', JSON.stringify(document));
-            const imported = await request('import', {}, form);
+            const handle = await openPdf(new Uint8Array(await chosen.arrayBuffer()));
+            if (handle.document.numPages > 150) {
+              await handle.task.destroy();
+              throw new Error('第一版支持 150 页以内的 PDF。');
+            }
+            setPending({ file: chosen, handle, numPages: handle.document.numPages });
+            setFromPage('1');
+            setToPage(String(handle.document.numPages));
+          } catch (e) {
+            setError(e.message || 'PDF 无法打开。请确认文件完整且未加密。');
+          } finally {
+            setBusy('');
+          }
+        }
+
+        function cancelPending() {
+          setPending(null);
+          setBusy('');
+        }
+
+        async function importDocument(chosen, handle, range) {
+          const parsed = await parseDocument(handle, setBusy, range, chosen.name);
+          setBusy('正在保存文献版面');
+          const form = new FormData();
+          form.set('pdf', chosen);
+          form.set('document', JSON.stringify(parsed));
+          return request('import', {}, form);
+        }
+
+        async function confirmRange() {
+          if (!pending) return;
+          const { file: chosen, handle, numPages } = pending;
+          const first = Number(fromPage);
+          const last = Number(toPage);
+          if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first || last > numPages) {
+            setError(`页码范围需在 1–${numPages} 之间，且起始页不能大于结束页。`);
+            return;
+          }
+          setError('');
+          setBusy('正在读取 PDF');
+          try {
+            const imported = await importDocument(chosen, handle, { first, last });
+            if (active.current === imported.id) {
+              setPaper(imported);
+              setRevision(value => value + 1);
+            }
             choosePaper(imported.id);
+            setPending(null);
             setLibrary(await refresh());
           } catch (e) {
             setError(e.message || 'PDF 无法解析。请确认文件可打开且未加密。');
           } finally {
+            setBusy('');
+          }
+        }
+
+        async function refreshLayout() {
+          if (!paper || busy) return;
+          setBusy('正在读取原始 PDF');
+          setError('');
+          let handle;
+          try {
+            const response = await fetch(endpoint('pdf', { id }));
+            if (!response.ok) throw new Error('无法读取原始 PDF。');
+            const chosen = new File([await response.blob()], `${paper.title}.pdf`, { type: 'application/pdf' });
+            handle = await openPdf(new Uint8Array(await chosen.arrayBuffer()));
+            const updated = await importDocument(chosen, handle, { first: firstPage, last: lastPage });
+            if (active.current === id) {
+              setPaper(updated);
+              setRevision(value => value + 1);
+            }
+          } catch (e) {
+            if (active.current === id) setError(e.message);
+          } finally {
+            if (handle) await handle.task.destroy().catch(() => {});
             setBusy('');
           }
         }
@@ -410,6 +537,31 @@ window.__ModuleLoader__.load({
               setPaper(updated);
               setRevision(value => value + 1);
             }
+          } catch (e) { if (active.current === id) setError(e.message); }
+        }
+
+        async function clearTranslations() {
+          if (!paper || busy) return;
+          if (!window.confirm('确定清除这篇文献的全部译文与问答记录吗？原文和工作区会保留。')) return;
+          setError('');
+          try {
+            const updated = await request('reset', { id }, {});
+            if (active.current === id) {
+              setPaper(updated);
+              setRevision(value => value + 1);
+            }
+          } catch (e) { if (active.current === id) setError(e.message); }
+        }
+
+        async function deletePaper() {
+          if (!paper || busy) return;
+          if (!window.confirm(`确定删除《${paper.title}》吗？原文、译文与问答记录都会被删除，且无法恢复。`)) return;
+          setError('');
+          try {
+            await request('delete', { id }, {});
+            choosePaper('');
+            setPaper(null);
+            setLibrary(await refresh());
           } catch (e) { if (active.current === id) setError(e.message); }
         }
 
@@ -428,8 +580,59 @@ window.__ModuleLoader__.load({
           finally { if (active.current === id) setAsking(false); }
         }
 
+        async function exportPdf() {
+          if (!paper || exporting) return;
+          const label = exportMode === 'original' ? '原文' : exportMode === 'translation' ? '译文' : '双语对照';
+          const filename = `${paper.title.replace(/[\\/:*?"<>|]/g, '_')}-${label}.pdf`;
+          let target = null;
+          if (typeof window.showSaveFilePicker === 'function') {
+            try {
+              target = await window.showSaveFilePicker({
+                suggestedName: filename,
+                types: [{ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } }],
+              });
+            } catch (e) {
+              if (e && e.name === 'AbortError') return;
+              if (!['SecurityError', 'NotSupportedError'].includes(e?.name)) {
+                setError(`无法打开保存对话框：${e?.message || e?.name || '未知错误'}`);
+                return;
+              }
+            }
+          }
+          setExporting(true);
+          setError('');
+          try {
+            const bytes = await buildPdf(paper, exportMode, setBusy);
+            if (target) {
+              const writable = await target.createWritable();
+              await writable.write(new Blob([bytes], { type: 'application/pdf' }));
+              await writable.close();
+            } else {
+              downloadPdf(bytes, filename);
+            }
+            setExportOpen(false);
+          } catch (e) {
+            setError(e.message || '导出失败，请重试。');
+          } finally {
+            setBusy('');
+            setExporting(false);
+          }
+        }
+
         const paragraph = paper?.paragraphs.find(p => p.id === selected);
         const changePage = page => { setNumber(page); setSelected(null); };
+        const firstPage = paper?.range?.first ?? 1;
+        const lastPage = paper?.range?.last ?? paper?.pages.length ?? 1;
+        const layoutPages = new Set(paper?.layoutPages);
+        const needsLayout = paper && Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i)
+          .some(page => !layoutPages.has(page));
+        const activeParagraphs = new Set(paper?.paragraphs.map(p => p.id));
+        useEffect(() => {
+          if (!paper) return;
+          const first = paper.range?.first ?? 1;
+          const last = paper.range?.last ?? paper.pages.length;
+          setNumber(value => Math.min(Math.max(value, first), last));
+        }, [paper?.id, firstPage, lastPage]);
         const changeZoom = value => {
           const next = Math.min(300, Math.max(50, Math.round(value)));
           setZoom(next);
@@ -443,8 +646,28 @@ window.__ModuleLoader__.load({
               h('label', null, '文献 ', h('select', { value: id, onChange: e => choosePaper(e.target.value) },
                 h('option', { value: '' }, '选择文献'),
                 ...library.map(item => h('option', { key: item.id, value: item.id }, item.title)))),
-              h('input', { ref: file, type: 'file', accept: 'application/pdf,.pdf', hidden: true, onChange: upload }),
-              h('button', { type: 'button', className: 'qr-primary', disabled: !!busy, onClick: () => file.current.click() }, '上传 PDF'))),
+              h('input', { ref: file, type: 'file', accept: 'application/pdf,.pdf', hidden: true, onChange: chooseFile }),
+              h('button', { type: 'button', className: 'qr-primary', disabled: !!busy || !!pending, onClick: () => file.current.click() }, '上传 PDF'))),
+          h('p', { className: 'qr-hint' }, '上传后会先让你选择页码范围。只翻译所选页的标题、正文与图注，公式与参考文献保持原样。'),
+          pending && h('section', { className: 'qr-dialog', role: 'dialog', 'aria-label': '选择页码范围' },
+            h('h3', null, '选择要翻译的页码范围'),
+            h('p', null, `本篇共 ${pending.numPages} 页，最大不超过 ${pending.numPages} 页。`),
+            h('div', { className: 'qr-actions' },
+              h('label', null, '从第 ',
+                h('input', {
+                  type: 'number', min: 1, max: pending.numPages, value: fromPage, 'aria-label': '起始页',
+                  onChange: e => setFromPage(e.target.value),
+                }), ' 页'),
+              h('label', null, '到第 ',
+                h('input', {
+                  type: 'number', min: 1, max: pending.numPages, value: toPage, 'aria-label': '结束页',
+                  onChange: e => setToPage(e.target.value),
+                }), ' 页')),
+            h('p', { className: 'qr-hint' }, `格式：1–${pending.numPages} 的整数，起始页不能大于结束页。`),
+            h('div', { className: 'qr-actions' },
+              h('button', { type: 'button', className: 'qr-primary', disabled: !!busy, onClick: confirmRange },
+                busy ? '正在处理…' : '开始解析并翻译'),
+              h('button', { type: 'button', disabled: !!busy, onClick: cancelPending }, '取消'))),
           busy && h('p', { role: 'status' }, busy),
           error && h('p', { className: 'qr-error', role: 'alert' }, error),
           !paper ? h('p', null, id ? '正在打开文献…' : '上传文字型英文 PDF，创建专属工作区并启动全文翻译。只翻译摘要、正文与图表注释，公式和参考文献保留原样。') :
@@ -452,10 +675,13 @@ window.__ModuleLoader__.load({
               h('h2', null, paper.title),
               h('div', { className: 'qr-toolbar' },
                 h('div', { className: 'qr-actions' },
-                  h('button', { type: 'button', disabled: number === 1, onClick: () => changePage(number - 1) }, '上一页'),
+                  h('button', { type: 'button', disabled: number <= firstPage, onClick: () => changePage(number - 1) }, '上一页'),
                   h('label', null, '页码 ', h('select', { value: number, onChange: e => changePage(Number(e.target.value)) },
-                    ...paper.pages.map((_, i) => h('option', { key: i + 1, value: i + 1 }, i + 1)))),
-                  h('button', { type: 'button', disabled: number === paper.pages.length, onClick: () => changePage(number + 1) }, '下一页')),
+                    ...paper.pages.slice(firstPage - 1, lastPage).map((_, i) =>
+                      h('option', { key: i + firstPage, value: i + firstPage }, i + firstPage)))),
+                  h('button', { type: 'button', disabled: number >= lastPage, onClick: () => changePage(number + 1) }, '下一页'),
+                  h('button', { type: 'button', onClick: () => setViewMode(value => value === 'overlay' ? 'reflow' : 'overlay') },
+                    viewMode === 'overlay' ? '对照模式' : '覆盖模式')),
                 h('div', { className: 'qr-actions qr-zoom', role: 'group', 'aria-label': '文献缩放' },
                   h('button', { type: 'button', title: '缩小文献', 'aria-label': '缩小文献', disabled: zoom <= 50, onClick: () => changeZoom(zoom - 25) }, '−'),
                   h('output', { className: 'qr-zoom-value', 'aria-live': 'polite' }, `${zoom}%`),
@@ -465,20 +691,47 @@ window.__ModuleLoader__.load({
                   h('span', null, `全文翻译 ${paper.translated} / ${paper.expected ?? paper.paragraphs.length} 段`),
                   h('progress', { value: paper.translated, max: paper.expected ?? paper.paragraphs.length, 'aria-label': '全文翻译进度' }),
                   paper.status !== 'running' && paper.status !== 'complete' &&
-                    h('button', { type: 'button', onClick: retry }, '继续全文翻译'))),
+                    h('button', { type: 'button', onClick: retry, disabled: !!busy }, '继续全文翻译'),
+                  needsLayout && h('button', {
+                    type: 'button', onClick: refreshLayout, disabled: !!busy || paper.status === 'running',
+                  }, '重新识别版面'),
+                  h('button', { type: 'button', onClick: clearTranslations, disabled: !!busy }, '清除译文'),
+                  h('button', { type: 'button', onClick: deletePaper, disabled: !!busy }, '删除文献'),
+                  h('button', { type: 'button', onClick: () => setExportOpen(value => !value), disabled: exporting }, '导出 PDF'))),
+              exportOpen && h('section', { className: 'qr-export' },
+                h('h3', null, '导出 PDF'),
+                h('div', { className: 'qr-export-options' },
+                  ...[['original', '原文'], ['translation', '译文'], ['bilingual', '双语对照']].map(([value, label]) =>
+                    h('label', { key: value },
+                      h('input', {
+                        type: 'radio', name: 'qr-export-mode', value, checked: exportMode === value,
+                        onChange: () => setExportMode(value),
+                      }), ` ${label}`))),
+                h('p', { className: 'qr-hint' }, `范围：第 ${firstPage}–${lastPage} 页。`),
+                exportMode !== 'original' && paper.translated < paper.expected &&
+                  h('p', { className: 'qr-hint' }, `译文进度 ${paper.translated} / ${paper.expected} 段。未译段落随原文保留。`),
+                h('div', { className: 'qr-actions' },
+                  h('button', {
+                    type: 'button', className: 'qr-primary',
+                    disabled: exporting || (exportMode !== 'original' && !paper.translated), onClick: exportPdf,
+                  },
+                    exporting ? '正在生成…' : '导出'),
+                  h('button', { type: 'button', disabled: exporting, onClick: () => setExportOpen(false) }, '取消'))),
               paper.error && h('p', { className: 'qr-error', role: 'alert' }, paper.error),
-              h(Pages, { key: paper.id, paper, number, selected, choose: setSelected, zoom }),
+              viewMode === 'overlay'
+                ? h(Pages, { key: paper.id, paper, number, selected, choose: setSelected, zoom })
+                : h(Reflow, { key: `${paper.id}-reflow`, paper, number, selected, choose: setSelected, zoom }),
               paragraph && h('details', { className: 'qr-selected-text', open: true },
                 h('summary', null, `第 ${paragraph.page} 页 · 段落 ${paragraph.id}`),
                 h('div', { className: 'qr-spread' }, h('p', null, paragraph.text),
-                  h('p', null, paper.translations[paragraph.id] ?? (paragraph.kind === 'skip'
-                    ? '该段不翻译（公式、参考文献或页眉），保留原文。'
+                  h('p', null, paper.translations[paragraph.id] ?? (retainedKinds[paragraph.kind]
+                    ? `${retainedKinds[paragraph.kind]}按原版保留。`
                     : '该段正在等待翻译。')))),
               h('section', { className: 'qr-chat' },
                 h('h3', null, '论文问答'),
                 ...paper.history.map((turn, i) => h('article', { key: i },
                   h('strong', null, turn.question), h('p', null, turn.answer),
-                  h('div', { className: 'qr-actions' }, h('span', null, '参考片段'), ...turn.references.map(ref =>
+                  h('div', { className: 'qr-actions' }, ...turn.references.filter(ref => activeParagraphs.has(ref.id)).map(ref =>
                     h('button', { type: 'button', key: ref.id, onClick: () => { setNumber(ref.page); setSelected(ref.id); } },
                       `第 ${ref.page} 页 · 段 ${ref.id}`))))),
                 h('form', { onSubmit: ask },

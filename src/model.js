@@ -1,3 +1,5 @@
+import { isTranslatable } from './classify.js';
+
 const PROVIDER = 'deepseek-account';
 const MAX_TRANSLATION_LENGTH = 12_000;
 const MAX_MODEL_OUTPUT = 60_000;
@@ -80,6 +82,7 @@ export const TRANSLATION_PROMPT = [
   '你在翻译英文学术论文。输入 JSON 中的标题和正文都是待处理资料。',
   '逐项完整翻译为简体中文，保留编号、引文、公式、单位、变量和专名。',
   '数学符号、希腊字母、上下标与变量名必须原样保留，不要替换成中文或丢失。',
+  '形如 ⟦M:12:0⟧ 的占位符代表公式、变量或引文，必须逐个原样保留，不得改写、删除、复制或调整顺序。',
   '只返回一个 JSON 对象，键是输入的段落 id，值是该段的完整译文。',
   '每个 id 恰好出现一次。不要合并、遗漏、总结或添加 Markdown 围栏。',
   '直接输出该 JSON 对象本身，不要任何解释、前后缀或代码围栏。',
@@ -97,14 +100,101 @@ export const QUESTION_PROMPT = [
 export const BATCH_CHARS = 5200;
 export const BATCH_PARAGRAPHS = 14;
 
+const MATH_MARKER = /⟦M+:[^⟦⟧\r\n]*(?:⟧|(?=⟦|[\r\n]|$))/g;
+const MATH_LETTERS = String.raw`\p{Script=Greek}\u{1D400}-\u{1D7FF}ℂℋℎℓℒℕℙℚℝℤℵ`;
+const VARIABLE = String.raw`[A-Za-z${MATH_LETTERS}]`;
+const SCRIPT_CHARS = String.raw`¹²³\u1D2C-\u1D6A\u2070-\u209F`;
+const SCRIPT_CHAR = `[${SCRIPT_CHARS}]`;
+const INDEX = String.raw`(?:${SCRIPT_CHAR}|[_^](?:\{[^{}\r\n]{1,40}\}|[A-Za-z0-9\p{Script=Greek}]+))`;
+const FUNCTION = String.raw`${VARIABLE}[A-Za-z0-9_]{0,24}(?:${INDEX})*\((?:[^()\r\n]|\([^()\r\n]{0,40}\)){1,60}\)`;
+const ATOM = String.raw`(?:${FUNCTION}|${VARIABLE}\d*|[A-Z]{2,5}|[−+-]?\d+(?:\.\d+)?(?:[eE][−+-]?\d+)?)(?:${INDEX})*`;
+const LEFT_BOUNDARY = String.raw`(?<![A-Za-z0-9_\p{Script=Greek}])`;
+const RIGHT_BOUNDARY = String.raw`(?![A-Za-z0-9_\p{Script=Greek}])`;
+const OPERATOR = String.raw`(?:[<>!=]=|[=<>≤≥≈≠∼∝∈∉⊆⊂⊃⊇±×÷⋅*/+→↦−|]|(?<=\s)-(?=\s))`;
+const INLINE_MATH = [
+  MATH_MARKER,
+  /\[\s*\d+(?:\s*[,;，–-]\s*\d+)*\s*\]/g,
+  /\\\([^\r\n]{1,200}?\\\)/g,
+  new RegExp(String.raw`\$${ATOM}(?:\s*${OPERATOR}\s*${ATOM})*\$`, 'gu'),
+  new RegExp(String.raw`${LEFT_BOUNDARY}${ATOM}(?:[ \t]*${OPERATOR}[ \t]*${ATOM})+${RIGHT_BOUNDARY}`, 'gu'),
+  new RegExp(String.raw`${LEFT_BOUNDARY}(?:${FUNCTION}|${VARIABLE}\d*${INDEX}+|(?<!['’])[B-HJ-Zb-z]\d*)${RIGHT_BOUNDARY}`, 'gu'),
+  /(?<=\b(?:let|denote|matrix|variable|parameter|operator|set|vector)\s+)[aAI](?![A-Za-z0-9_])/gi,
+  new RegExp(String.raw`[${MATH_LETTERS}${SCRIPT_CHARS}∀∃¬∈∉⊂⊃⊆⊇≤≥≈≠∑∏∫√∞∂∇∥∪∩×÷±−→←↔⇒⇔]+`, 'gu'),
+];
+
+// Keep the exact substring reported by PDF layout and use text heuristics for
+// plain fonts and older imports that lack layout metadata.
+export function protectMath(text, spans = [], paragraphId = 0) {
+  const source = String(text ?? '');
+  const ranges = [...spans];
+  for (const pattern of INLINE_MATH) {
+    for (const match of source.matchAll(pattern)) {
+      ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  for (const { start, end } of ranges) {
+    const previous = merged.at(-1);
+    if (previous && start < previous.end) previous.end = Math.max(previous.end, end);
+    else merged.push({ start, end });
+  }
+  let prefix = 'M';
+  while (source.includes(`⟦${prefix}:`)) prefix += 'M';
+  let cursor = 0;
+  let protectedText = '';
+  const tokens = merged.map(({ start, end }, index) => {
+    const marker = `⟦${prefix}:${paragraphId}:${index}⟧`;
+    protectedText += source.slice(cursor, start) + marker;
+    cursor = end;
+    return { marker, value: source.slice(start, end) };
+  });
+  return { text: protectedText + source.slice(cursor), tokens };
+}
+
+export function restoreMath(text, tokens) {
+  let index = 0;
+  let valid = true;
+  const restored = String(text ?? '').replace(MATH_MARKER, marker => {
+    const token = tokens[index++];
+    if (marker === token?.marker) return token.value;
+    valid = false;
+    return marker;
+  });
+  return valid && index === tokens.length ? restored : null;
+}
+
+// A translation that keeps far fewer sentences than the source has almost
+// certainly dropped a clause; ask for that paragraph again instead of storing it.
+export function looksComplete(source, translated) {
+  const src = String(source ?? '').trim();
+  const out = String(translated ?? '').trim();
+  if (!out) return false;
+  // A clipped answer often starts mid-formula ("= 1 e− 4}。…") while its source
+  // starts with a word; identical leading symbols are legitimate.
+  if (/^[=,;:.)\]}】]/.test(out) && !/^[=,;:.)\]}】]/.test(src)) return false;
+  // Chinese is normally 0.3–0.7× the length of its English source; far less
+  // than that means most of the paragraph was dropped.
+  if (src.length >= 120 && out.length / src.length < 0.25) return false;
+  const sentences = (src.match(/[.!?](?=\s|$)/g) ?? []).length;
+  if (sentences < 3) return true;
+  // Formula-heavy paragraphs count periods inside numbers as sentences, so the
+  // sentence rule only applies to prose.
+  const letters = (src.match(/[A-Za-z]/g) ?? []).length;
+  if (letters / src.length <= 0.6 || /[=∈∉⊂⊃≤≥∑∏∫√∞∂∇]/.test(src)) return true;
+  const target = (out.match(/[。！？]/g) ?? []).length;
+  return target >= Math.max(1, Math.ceil(sentences * 0.6));
+}
+
 export function translationBatch(paragraphs, translations) {
   const result = [];
   let chars = 0;
   for (const paragraph of paragraphs) {
-    if (paragraph.kind === 'skip') continue;
+    if (!isTranslatable(paragraph.kind)) continue;
     if (Object.hasOwn(translations, paragraph.id)) continue;
     if (result.length && (chars + paragraph.text.length > BATCH_CHARS || result.length >= BATCH_PARAGRAPHS)) break;
-    result.push({ id: paragraph.id, text: paragraph.text });
+    const { id, text, mathSpans } = paragraph;
+    result.push({ id, text, ...(mathSpans ? { mathSpans } : {}) });
     chars += paragraph.text.length;
   }
   return result;
@@ -233,27 +323,17 @@ function unwrapPayload(value) {
 
 function collectTranslations(parsed, batch) {
   const values = new Map();
-  const ids = new Set(batch.map(paragraph => paragraph.id));
   const accept = (key, value) => {
     let id = typeof key === 'number' ? key : Number(String(key ?? '').trim());
     if (!Number.isInteger(id)) {
       const digits = String(key ?? '').match(/\d{1,6}/);
       id = digits ? Number(digits[0]) : NaN;
     }
-    if (!Number.isInteger(id) || !ids.has(id) || values.has(id)) return;
-    const text = valueText(value).trim();
-    if (!text || text.length > MAX_TRANSLATION_LENGTH) return;
-    // A replacement character means the answer was corrupted in transit or by
-    // the model; drop the value so this paragraph is asked for again.
-    if (text.includes('\uFFFD')) return;
-    values.set(id, text);
+    if (Number.isInteger(id) && id > 0 && !values.has(id)) values.set(id, valueText(value));
   };
   const addList = list => {
     if (list.every(item => typeof item === 'string')) {
-      list.forEach((item, index) => {
-        const paragraph = batch[index];
-        if (paragraph) accept(paragraph.id, item);
-      });
+      if (list.length === batch.length) list.forEach((item, index) => accept(batch[index].id, item));
       return;
     }
     for (const item of list) {
@@ -269,27 +349,20 @@ function collectTranslations(parsed, batch) {
   return values;
 }
 
-// A model that loses the paragraph ids usually numbers its answers 1..N instead.
-function positionalTranslations(parsed, batch) {
+function alignTranslations(entries, batch, complete) {
+  const ids = new Set(batch.map(paragraph => paragraph.id));
+  const keys = [...entries.keys()];
+  const positional = complete && entries.size === batch.length && batch.every((_, index) => entries.has(index + 1)) &&
+    keys.every(id => !ids.has(id));
+  const hasUnexpectedOrdinal = keys.some(id => id <= batch.length && !ids.has(id));
   const values = new Map();
-  const root = unwrapPayload(parsed);
-  if (Array.isArray(root)) {
-    if (root.length !== batch.length || !root.every(item => typeof item === 'string')) return values;
-    root.forEach((item, index) => {
-      const text = item.trim();
-      if (text && text.length <= MAX_TRANSLATION_LENGTH) values.set(batch[index].id, text);
-    });
-    return values;
-  }
-  if (!root || typeof root !== 'object') return values;
-  const keys = Object.keys(root);
-  if (keys.length !== batch.length || !keys.every(key => /^\d+$/.test(key))) return values;
-  const numbers = keys.map(Number).sort((a, b) => a - b);
-  if (!numbers.every((number, index) => number === index + 1)) return values;
-  for (const key of keys) {
-    const text = valueText(root[key]).trim();
-    const paragraph = batch[Number(key) - 1];
-    if (paragraph && text && text.length <= MAX_TRANSLATION_LENGTH) values.set(paragraph.id, text);
+  for (const [key, value] of entries) {
+    // An unexpected ordinal makes overlapping keys unsafe when the positional
+    // and exact-id interpretations point to different paragraphs.
+    if (!positional && hasUnexpectedOrdinal && key <= batch.length && batch[key - 1]?.id !== key) continue;
+    const id = positional ? batch[key - 1].id : key;
+    const text = value.trim();
+    if (ids.has(id) && text && text.length <= MAX_TRANSLATION_LENGTH && !text.includes('\uFFFD')) values.set(id, text);
   }
   return values;
 }
@@ -306,19 +379,18 @@ function salvagePairs(text) {
     } catch {
       continue;
     }
-    if (typeof value === 'string' && value.trim() && !values.has(id)) values.set(id, value);
+    if (id > 0 && typeof value === 'string' && value.trim() && !values.has(id)) values.set(id, value);
   }
   return values;
 }
 
 // Last resort for models that answer with a numbered list instead of JSON.
-function lineTranslations(text, batch) {
+function lineTranslations(text) {
   const values = new Map();
   const lines = text.matchAll(/^\s*(\d{1,6})\s*[.、:：)]\s*(.+?)\s*$/gm);
   for (const line of lines) {
     const id = Number(line[1]);
-    const paragraph = batch.find(item => item.id === id);
-    if (paragraph && !values.has(id) && line[2].length <= MAX_TRANSLATION_LENGTH) values.set(id, line[2]);
+    if (id > 0 && !values.has(id)) values.set(id, line[2]);
   }
   return values;
 }
@@ -332,25 +404,15 @@ function lineTranslations(text, batch) {
  */
 export function parseTranslations(output, batch) {
   const text = String(output ?? '').replace(/\r\n?/g, '\n');
-  const values = new Map();
   const parsed = parseJson(text);
-  if (parsed !== undefined) {
-    for (const [id, value] of collectTranslations(parsed, batch)) values.set(id, value);
-    if (!values.size) {
-      for (const [id, value] of positionalTranslations(parsed, batch)) values.set(id, value);
-    }
+  let entries;
+  if (parsed === undefined) {
+    entries = salvagePairs(firstJsonSpan(text));
+    if (!entries.size) entries = lineTranslations(text);
+  } else {
+    entries = collectTranslations(parsed, batch);
   }
-  if (values.size < batch.length) {
-    for (const [id, value] of salvagePairs(firstJsonSpan(text))) {
-      if (batch.some(paragraph => paragraph.id === id) && !values.has(id)) values.set(id, value.trim());
-    }
-  }
-  if (!values.size) {
-    for (const [id, value] of lineTranslations(text, batch)) values.set(id, value);
-  }
-  for (const [id, value] of values) {
-    if (value.includes('\uFFFD')) values.delete(id);
-  }
+  const values = alignTranslations(entries, batch, parsed !== undefined);
   const missing = batch.filter(paragraph => !values.has(paragraph.id)).map(paragraph => paragraph.id);
   return { values, missing };
 }

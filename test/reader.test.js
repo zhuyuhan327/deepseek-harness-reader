@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createReader } from '../src/host.js';
-import { parseTranslations } from '../src/model.js';
+import { parseTranslations, protectMath, restoreMath } from '../src/model.js';
 
 const origin = 'http://127.0.0.1:8767';
 
@@ -85,7 +85,9 @@ async function harness(t) {
       pages: [{ width: 612, height: 792 }],
       paragraphs: Array.from({ length: count }, (_, index) => ({
         id: index + 1, page: 1, box: [0.1, 0.1, 0.9, 0.15],
-        text: texts?.[index] ?? `${title}: section ${index + 1} describes the experimental method.`,
+        ...(typeof texts?.[index] === 'object' ? texts[index] : {
+          text: texts?.[index] ?? `${title}: section ${index + 1} describes the experimental method.`,
+        }),
       })),
     }));
     const result = await request('import', null, form);
@@ -153,6 +155,45 @@ test('重复导入复用工作区，论文问答只读取当前文献', async t 
   assert.equal((await host.request('detail', first.id)).value.history.length, 0);
 });
 
+test('重导同一 PDF 的其他页保留既有段落编号与译文', async t => {
+  const host = await harness(t);
+  const upload = async (first, layoutVersion) => {
+    const form = new FormData();
+    form.set('pdf', new File(['%PDF-1.7\nPage range fixture\n%%EOF'], 'range.pdf'));
+    form.set('document', JSON.stringify({
+      title: 'Page range fixture',
+      layoutVersion,
+      pages: Array.from({ length: 2 }, () => ({ width: 612, height: 792 })),
+      range: { first, last: first },
+      paragraphs: [{
+        id: 1, page: first, box: [.1, .2, .9, .25], lines: [[.1, .2, .8, .24]],
+        text: first === 1 ? 'The first section describes experimental methods.' : 'The next section presents research findings.',
+      }],
+    }));
+    const result = await host.request('import', null, form);
+    assert.equal(result.status, 201);
+    return result.value;
+  };
+  const first = await upload(1);
+  const saved = await host.until(first.id, 'complete');
+  const reanalyzed = await upload(1, 1);
+  assert.deepEqual(reanalyzed.layoutPages, [1]);
+  assert.deepEqual(reanalyzed.translations, saved.translations);
+
+  const second = await upload(2, 1);
+  assert.equal(second.id, first.id);
+  assert.equal(second.workspaceId, first.workspaceId);
+  assert.deepEqual(second.range, { first: 2, last: 2 });
+  assert.deepEqual(second.paragraphs.map(({ id, page }) => [id, page]), [[2, 2]]);
+  assert.deepEqual(second.translations, {});
+  await host.request('translate', second.id, {});
+  assert.equal((await host.until(second.id, 'complete')).translated, 1);
+
+  const reopened = await upload(1, 1);
+  assert.deepEqual(reopened.translations, saved.translations);
+  assert.equal(host.calls.length, 2);
+});
+
 test('译文解析容忍围栏、前后缀、嵌套、数组、截断与编号列表', () => {
   const batch = [{ id: 1, text: 'a' }, { id: 2, text: 'b' }, { id: 3, text: 'c' }];
   const size = output => parseTranslations(output, batch).values.size;
@@ -189,6 +230,24 @@ test('模型把译文包在解释和代码围栏里时仍能完成全文翻译',
   const complete = await host.until(paper.id, 'complete');
   assert.equal(complete.status, 'complete');
   assert.equal(complete.translations[1], '第 1 段的译文');
+});
+
+test('有歧义的顺序编号不会把译文写给其他段落', () => {
+  const batch = [{ id: 2 }, { id: 5 }];
+  for (const output of [
+    '{"1":"甲","2":"乙"}',
+    '{"1":"甲","2":"乙","3":"未完',
+    '1. 甲\n2. 乙',
+    '["乙"]',
+  ]) {
+    const { values, missing } = parseTranslations(output, batch);
+    assert.equal(values.size, 0);
+    assert.deepEqual(missing, [2, 5]);
+  }
+  assert.deepEqual([...parseTranslations('{"2":"甲","5":"乙"}', batch).values], [[2, '甲'], [5, '乙']]);
+  assert.deepEqual([...parseTranslations('{"1":"甲","2":"乙"}', [{ id: 4 }, { id: 5 }]).values], [[4, '甲'], [5, '乙']]);
+  const oversized = '译'.repeat(12_001);
+  assert.equal(parseTranslations(`{"2":"${oversized}","5":"未完`, batch).values.size, 0);
 });
 
 test('译文被截断时先保存可用段落，再补齐剩余段落', async t => {
@@ -237,6 +296,123 @@ test('含替换字符的旧译文会被丢弃并在继续时重新翻译', async
   assert.equal((await host.request('translate', paper.id, {})).status, 202);
   const fixed = await host.until(paper.id, 'complete');
   assert.equal(fixed.translations[2], '第 2 段的译文');
+});
+
+test('公式占位符保护与回填', () => {
+  const source = 'Use ⟦M:7:0⟧ in the original text, and solve xᵢ = σ² + 10⁻³ [1, 2].';
+  const { text, tokens } = protectMath(source, [], 7);
+  assert.deepEqual(tokens.map(token => token.value), ['⟦M:7:0⟧', 'xᵢ = σ² + 10⁻³', '[1, 2]']);
+  assert.ok(tokens.every(token => !source.includes(token.marker)));
+  assert.equal(restoreMath(text, tokens), source);
+  const markers = tokens.map(token => token.marker);
+  assert.equal(restoreMath(markers.slice(1).join(' '), tokens), null);
+  assert.equal(restoreMath(markers.toReversed().join(' '), tokens), null);
+  assert.equal(restoreMath([...markers, markers[0]].join(' '), tokens), null);
+  assert.equal(restoreMath(text.replace(markers[0], '[0]'), tokens), null);
+  assert.equal(restoreMath(protectMath(source, [], 8).text, tokens), null);
+});
+
+test('保留 PDF 提取标记的行内公式与原有引文', async t => {
+  const host = await harness(t);
+  const source = '  The custom operator customKernel yields the next value [1].  ';
+  const start = source.indexOf('customKernel');
+  host.setReply(data => JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, `译文：${p.text}`]))));
+  const paper = await host.upload('Inline layout', 1, [{ text: source, mathSpans: [{ start, end: start + 12 }] }]);
+  const complete = await host.until(paper.id, 'complete');
+  assert.deepEqual(complete.paragraphs[0].mathSpans, [{ start: start - 2, end: start + 10 }]);
+  const sent = host.calls[0].paragraphs[0].text;
+  assert.ok(!sent.includes('customKernel') && !sent.includes('[1]'));
+  assert.equal(complete.translations[1], `译文：${source.trim()}`);
+});
+
+test('只保存回填后通过完整性检查的译文', async t => {
+  const host = await harness(t);
+  const source = 'This carefully constructed numerical model estimates the next unknown parameter σ and compares it with the previously computed estimate under several assumptions.';
+  host.setReply((data, attempt) => JSON.stringify(Object.fromEntries(data.paragraphs.map(p => {
+    const { marker } = protectMath(source, [], p.id).tokens[0];
+    const value = attempt ? `译文：${p.text}` : '译'.repeat(Math.floor(source.length / 4) - 2) + marker;
+    return [p.id, value];
+  }))));
+  const paper = await host.upload('Formula length', 1, [source]);
+  const complete = await host.until(paper.id, 'complete');
+  assert.equal(host.calls.length, 2);
+  assert.equal(complete.translations[1], `译文：${source}`);
+});
+
+test('译文丢失占位符时整段重译并回填符号', async t => {
+  const host = await harness(t);
+  let first = true;
+  host.setReply(data => {
+    if (first) {
+      first = false;
+      return JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, '缺少占位符的译文'])));
+    }
+    return JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, `第 ${p.id} 段：${p.text}`])));
+  });
+  const paper = await host.upload('Symbols', 2, [
+    'The noise σ is sampled at each step.',
+    'The weight ϵ decays over time.',
+  ]);
+  const complete = await host.until(paper.id, 'complete');
+  assert.ok(complete.translations[1].includes('σ'));
+  assert.ok(complete.translations[2].includes('ϵ'));
+  assert.equal(first, false);
+});
+
+test('译文丢句时重译', async t => {
+  const host = await harness(t);
+  let first = true;
+  host.setReply(data => {
+    if (first) {
+      first = false;
+      return JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, '只译了第一句。'])));
+    }
+    return JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, `第 ${p.id} 段：第一句。第二句。第三句。`])));
+  });
+  const paper = await host.upload('Sentences', 2, [
+    'First sentence here. Second sentence follows. Third sentence ends.',
+    'Alpha starts. Beta continues. Gamma finishes.',
+  ]);
+  const complete = await host.until(paper.id, 'complete');
+  assert.match(complete.translations[1], /第三句/);
+  assert.equal(first, false);
+});
+
+test('疑似截断的旧译文会被作废并重译', async t => {
+  const host = await harness(t);
+  const paper = await host.upload('Clipped answer', 2, [
+    'A long English sentence that describes the proposed method in enough detail to be checked by the completeness rule.',
+    'Another long English sentence about the experiments, the datasets and the measured results of this paper.',
+  ]);
+  await host.until(paper.id, 'complete');
+  const path = join(host.root, paper.id, 'translations.json');
+  const data = JSON.parse(await readFile(path, 'utf8'));
+  data[1] = '= 1 e− 4}。';
+  await writeFile(path, JSON.stringify(data));
+
+  const broken = (await host.request('detail', paper.id)).value;
+  assert.equal(broken.translated, 1);
+  assert.equal((await host.request('translate', paper.id, {})).status, 202);
+  const fixed = await host.until(paper.id, 'complete');
+  assert.match(fixed.translations[1], /第 1 段/);
+});
+
+test('可以清除译文，也可以整篇删除', async t => {
+  const host = await harness(t);
+  const paper = await host.upload('Deletable', 3);
+  await host.until(paper.id, 'complete');
+
+  const reset = await host.request('reset', paper.id, {});
+  assert.equal(reset.status, 200);
+  assert.equal(reset.value.translated, 0);
+  assert.equal(reset.value.status, 'pending');
+  assert.equal((await host.request('detail', paper.id)).value.translations[1], undefined);
+
+  const removed = await host.request('delete', paper.id, {});
+  assert.equal(removed.status, 200);
+  assert.equal(removed.value.deleted, paper.id);
+  const missing = await host.request('detail', paper.id);
+  assert.equal(missing.status, 404);
 });
 
 test('模型始终返回无法解析的内容时报告错误而不是死循环', async t => {
