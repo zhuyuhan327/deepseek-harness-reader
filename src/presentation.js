@@ -150,9 +150,10 @@ function fit(ctx, units, paragraph, width, height) {
   const originalSize = style.size || Math.min(h, paragraph.kind === 'heading' ? 16 : 11);
   const leading = Math.max(1.12, Math.min(1.55, (style.lineHeight || originalSize * 1.22) / originalSize));
   const bold = style.bold || paragraph.kind === 'heading';
-  const serif = bold ? BOLD_SERIF : SERIF;
-  const family = style.fontFamily === 'sans-serif' ? SANS : style.fontFamily === 'monospace' ? MONO : serif;
-  const format = size => `${style.italic ? 'italic ' : ''}${bold ? '700' : '400'} ${size}px ${family}`;
+  // Chinese translations are far easier to read in a UI sans font; the serif
+  // stack (SimSun/Songti) renders thin and faint at overlay sizes.
+  const family = style.fontFamily === 'monospace' ? MONO : SANS;
+  const format = size => `${style.italic ? 'italic ' : ''}${bold ? '700' : '500'} ${size}px ${family}`;
   const layoutAt = size => {
     ctx.font = format(size);
     const lines = wrap(ctx, units, w, size);
