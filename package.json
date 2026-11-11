@@ -1,6 +1,6 @@
 {
   "name": "dsh-quiet-reader",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "阅藏：DeepSeek Harness 的双语论文阅读模式",
   "type": "module",
   "main": "./src/host.js",

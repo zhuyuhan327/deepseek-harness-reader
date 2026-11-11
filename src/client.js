@@ -369,6 +369,8 @@ window.__ModuleLoader__.load({
         const [viewMode, setViewMode] = useState('overlay');
         const [models, setModels] = useState({ current: null, providers: [] });
         const [efforts, setEfforts] = useState([]);
+        const [effortsLoading, setEffortsLoading] = useState(false);
+        const effortRequest = useRef(0);
         const [zoom, setZoom] = useState(() => {
           try {
             const stored = Number(localStorage.getItem('dsh-quiet-reader:zoom'));
@@ -392,21 +394,13 @@ window.__ModuleLoader__.load({
         // so models released later show up without a plugin update.
         useEffect(() => {
           const controller = new AbortController();
-          void request('settings', {}, undefined, controller.signal).then(setModels).catch(() => {});
+          void request('settings', {}, undefined, controller.signal).then(saved => {
+            setModels(saved);
+            const current = saved?.current;
+            if (current?.provider && current?.model) void refreshEfforts(current.provider, current.model);
+          }).catch(() => {});
           return () => controller.abort();
         }, []);
-        useEffect(() => {
-          const current = models.current;
-          if (!current?.provider || !current?.model) {
-            setEfforts([]);
-            return undefined;
-          }
-          const controller = new AbortController();
-          void request('modelInfo', { provider: current.provider, model: current.model }, undefined, controller.signal)
-            .then(info => setEfforts(info.efforts ?? []))
-            .catch(() => setEfforts([]));
-          return () => controller.abort();
-        }, [models.current?.provider, models.current?.model]);
         // Workspaces added or removed in the DSH sidebar show up here: refresh
         // the library, follow the selected workspace, and drop a paper whose
         // workspace disappeared.
@@ -550,12 +544,27 @@ window.__ModuleLoader__.load({
           }
         }
 
+        async function refreshEfforts(provider, model) {
+          const token = ++effortRequest.current;
+          setEffortsLoading(true);
+          try {
+            const info = await request('modelInfo', { provider, model });
+            if (effortRequest.current === token) setEfforts(info.efforts ?? []);
+          } catch {
+            if (effortRequest.current === token) setEfforts([]);
+          } finally {
+            if (effortRequest.current === token) setEffortsLoading(false);
+          }
+        }
+
         async function chooseModel(patch) {
-          const next = { ...models.current, ...patch };
+          const next = { ...(models.current ?? {}), ...patch };
+          // Update the picker immediately; the effort list follows in parallel.
+          setModels(state => ({ ...state, current: next }));
+          if (patch.provider || patch.model) void refreshEfforts(next.provider, next.model);
           try {
             const saved = await request('settings', {}, next);
             setModels(saved);
-            setEfforts([]);
           } catch (e) { setError(e.message); }
         }
 
@@ -734,10 +743,12 @@ window.__ModuleLoader__.load({
                     h('select', {
                       value: models.current?.reasoningEffort ?? '',
                       'aria-label': '推理强度',
-                      disabled: !efforts.length,
+                      disabled: effortsLoading || !efforts.length,
+                      title: effortsLoading ? '正在读取该模型的推理强度…'
+                        : efforts.length ? '' : '该模型没有可调的推理强度，换用带思考的模型后可调',
                       onChange: e => void chooseModel({ reasoningEffort: e.target.value }),
                     },
-                    h('option', { value: '' }, efforts.length ? '默认' : '不可调'),
+                    h('option', { value: '' }, effortsLoading ? '读取中…' : efforts.length ? '默认' : '不支持'),
                     ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name))))),
                 h('div', { className: 'qr-actions', role: 'status' },
                   h('span', null, `全文翻译 ${paper.translated} / ${paper.expected ?? paper.paragraphs.length} 段`),
