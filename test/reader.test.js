@@ -16,17 +16,25 @@ function defaultReply(data) {
 
 function model() {
   const calls = [];
+  const requests = [];
   let failAt = -1;
   let reply = null;
   const llm = {
     listProviders: () => [{ id: 'deepseek-account' }, { id: 'api-key' }],
     listModels: async provider => {
-      assert.equal(provider, 'deepseek-account');
-      return [{ id: 'test-flash', inputModalities: ['text'] }];
+      if (provider !== 'deepseek-account') return [];
+      return [
+        { id: 'test-flash', inputModalities: ['text'] },
+        { id: 'test-pro', inputModalities: ['text'] },
+      ];
     },
+    resolveModelInfo: async (provider, model) => ({
+      reasoning: { efforts: [{ id: 'off', name: '关闭' }, { id: 'high', name: '高' }] },
+    }),
     async *stream(options) {
       assert.equal(options.provider, 'deepseek-account');
       assert.deepEqual(options.tools, []);
+      requests.push({ provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort });
       const data = JSON.parse(options.messages[0].content[0].text);
       calls.push(data);
       if (calls.length === failAt) {
@@ -39,7 +47,7 @@ function model() {
     },
   };
   return {
-    llm, calls,
+    llm, calls, requests,
     failOn(call) { failAt = call; },
     setReply(fn) { reply = fn; },
   };
@@ -452,6 +460,26 @@ test('模型始终返回无法解析的内容时报告错误而不是死循环',
   assert.match(failed.error, /无法解析/);
   assert.equal(failed.translated, 0);
   assert.ok(host.calls.length < 20);
+});
+
+test('可以选择模型与推理强度并在翻译时使用', async t => {
+  const host = await harness(t);
+  const catalogue = (await host.request('settings')).value;
+  assert.ok(catalogue.providers.some(provider => provider.id === 'deepseek-account'
+    && provider.models.some(model => model.id === 'test-pro')));
+  const info = (await host.request('modelInfo', { provider: 'deepseek-account', model: 'test-pro' })).value;
+  assert.deepEqual(info.efforts.map(effort => effort.id), ['off', 'high']);
+
+  const saved = (await host.request('settings', null, {
+    provider: 'deepseek-account', model: 'test-pro', reasoningEffort: 'high',
+  })).value;
+  assert.equal(saved.current.model, 'test-pro');
+  assert.equal(saved.current.reasoningEffort, 'high');
+
+  const paper = await host.upload('Model choice', 2);
+  await host.until(paper.id, 'complete');
+  assert.equal(host.requests[0].model, 'test-pro');
+  assert.equal(host.requests[0].reasoningEffort, 'high');
 });
 
 test('宿主拒绝跨站请求', async t => {

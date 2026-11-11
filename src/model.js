@@ -27,6 +27,34 @@ export async function accountRoute(llm, signal) {
   return route;
 }
 
+/**
+ * Resolve the user's chosen provider/model. The choice is re-validated against
+ * the live catalogue on every run, so a removed model falls back to the default
+ * and a newly published model works without a plugin update.
+ */
+export async function routeFor(llm, preference, signal) {
+  const provider = typeof preference?.provider === 'string' ? preference.provider : '';
+  const model = typeof preference?.model === 'string' ? preference.model : '';
+  if (provider && model && llm.listProviders().some(item => item.id === provider)) {
+    try {
+      const models = await llm.listModels(provider);
+      if ((models ?? []).some(item => item.id === model)) {
+        const route = { provider, model };
+        const info = await llm.resolveModelInfo?.(provider, model, signal);
+        const efforts = info?.reasoning?.efforts ?? [];
+        const wanted = typeof preference?.reasoningEffort === 'string' ? preference.reasoningEffort : '';
+        if (wanted && efforts.some(effort => effort.id === wanted)) route.reasoningEffort = wanted;
+        else if (efforts.some(effort => effort.id === 'off')) route.reasoningEffort = 'off';
+        return route;
+      }
+    } catch {
+      // Fall through to the default route.
+    }
+  }
+  return accountRoute(llm, signal);
+}
+
+
 export async function complete(llm, route, system, data, maxTokens, signal) {
   const active = AbortSignal.any([signal, AbortSignal.timeout(150_000)]);
   const blocks = new Map();

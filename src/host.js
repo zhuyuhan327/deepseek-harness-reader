@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  accountRoute, complete, looksComplete, protectMath, ReaderError, restoreMath, restoreMathTolerant, QUESTION_PROMPT, selectEvidence,
+  routeFor, complete, looksComplete, protectMath, ReaderError, restoreMath, restoreMathTolerant, QUESTION_PROMPT, selectEvidence,
   TRANSLATION_PROMPT, translationBatch, parseTranslations,
 } from './model.js';
 import { classifyParagraphs, isTranslatable } from './classify.js';
@@ -304,6 +304,38 @@ export function createReader(ctx, root) {
   const lifetime = new AbortController();
   let modelTail = Promise.resolve();
 
+  const settingsPath = join(dirname(root), 'settings.json');
+  let catalogue = { at: 0, value: null };
+
+  async function readSettings() {
+    const stored = await readJson(settingsPath, {});
+    return stored && typeof stored === 'object' ? stored : {};
+  }
+
+  // The catalogue is read from Harness on demand, so models added by a future
+  // DSH update appear in the picker without changing the plugin.
+  async function modelCatalogue() {
+    if (catalogue.value && Date.now() - catalogue.at < 60_000) return catalogue.value;
+    const providers = [];
+    for (const provider of ctx.llm.listProviders()) {
+      let models;
+      try {
+        models = await ctx.llm.listModels(provider.id);
+      } catch {
+        models = [];
+      }
+      const text = (models ?? []).filter(model => !model.inputModalities || model.inputModalities.includes('text'));
+      if (!text.length) continue;
+      providers.push({
+        id: provider.id,
+        name: provider.name ?? provider.id,
+        models: text.map(model => ({ id: model.id, name: model.name ?? model.id })),
+      });
+    }
+    catalogue = { at: Date.now(), value: providers };
+    return providers;
+  }
+
   function waitForTask(promise, signal) {
     return new Promise((resolve, reject) => {
       const aborted = () => reject(signal.reason);
@@ -400,7 +432,7 @@ export function createReader(ctx, root) {
         if (droppedEmpty || droppedSuspicious) await saveJson(path, translations);
         if (!translationBatch(document.paragraphs, translations).length) return;
         signal.throwIfAborted();
-        const route = await waitForTask(accountRoute(ctx.llm, signal), signal);
+        const route = await waitForTask(routeFor(ctx.llm, await readSettings(), signal), signal);
         let stalls = 0;
         const limit = document.paragraphs.length * 2 + 50;
         for (let round = 0; round < limit; round++) {
@@ -532,7 +564,7 @@ export function createReader(ctx, root) {
         const history = document.history.slice(-2).map(turn => ({
           question: turn.question.slice(0, 400), answer: turn.answer.slice(0, 750),
         }));
-        const route = await waitForTask(accountRoute(ctx.llm, signal), signal);
+        const route = await waitForTask(routeFor(ctx.llm, await readSettings(), signal), signal);
         const reply = await modelTask(() => complete(ctx.llm, route, QUESTION_PROMPT, {
           title: document.title, question, history, excerpts,
         }, 1400, signal), signal);
@@ -605,6 +637,20 @@ export function createReader(ctx, root) {
         if (action === 'list') return json(await list());
         if (action === 'detail') return json(await detail(id));
         if (action === 'asset') return await asset(searchParams.get('name') ?? '');
+        if (action === 'settings') {
+          return json({ current: await readSettings(), providers: await modelCatalogue() });
+        }
+        if (action === 'modelInfo') {
+          const provider = searchParams.get('provider') ?? '';
+          const model = searchParams.get('model') ?? '';
+          try {
+            const info = await ctx.llm.resolveModelInfo?.(provider, model);
+            const efforts = (info?.reasoning?.efforts ?? []).map(effort => ({ id: effort.id, name: effort.name ?? effort.id }));
+            return json({ efforts });
+          } catch {
+            return json({ efforts: [] });
+          }
+        }
         if (action === 'pdf') {
           await paper(id);
           return new Response(await readFile(join(directory(id), 'original.pdf')), {
@@ -614,6 +660,25 @@ export function createReader(ctx, root) {
       }
       if (request.method === 'POST') {
         if (action === 'import') return json(await importPaper(request), 201);
+        if (action === 'settings') {
+          let input;
+          try { input = JSON.parse(await boundedBody(request, 4096)); } catch { throw new ReaderError('模型设置格式无效。'); }
+          const providers = await modelCatalogue();
+          const provider = providers.find(item => item.id === input?.provider) ?? providers[0];
+          if (!provider) throw new ReaderError('当前没有可用的文本模型。', 503);
+          const model = provider.models.find(item => item.id === input?.model) ?? provider.models[0];
+          const settings = { provider: provider.id, model: model.id };
+          let efforts = [];
+          try {
+            const info = await ctx.llm.resolveModelInfo?.(provider.id, model.id);
+            efforts = info?.reasoning?.efforts ?? [];
+          } catch {}
+          const wanted = typeof input?.reasoningEffort === 'string' ? input.reasoningEffort : '';
+          if (wanted && efforts.some(effort => effort.id === wanted)) settings.reasoningEffort = wanted;
+          else if (efforts.some(effort => effort.id === 'off')) settings.reasoningEffort = 'off';
+          await saveJson(settingsPath, settings);
+          return json({ current: settings, providers });
+        }
         if (action === 'translate') {
           await prepareTranslation(id);
           return json(await detail(id), 202);

@@ -367,6 +367,8 @@ window.__ModuleLoader__.load({
         const [exportMode, setExportMode] = useState('bilingual');
         const [exporting, setExporting] = useState(false);
         const [viewMode, setViewMode] = useState('overlay');
+        const [models, setModels] = useState({ current: null, providers: [] });
+        const [efforts, setEfforts] = useState([]);
         const [zoom, setZoom] = useState(() => {
           try {
             const stored = Number(localStorage.getItem('dsh-quiet-reader:zoom'));
@@ -386,6 +388,25 @@ window.__ModuleLoader__.load({
           });
           return () => controller.abort();
         }, []);
+        // Model catalogue and the saved choice: read from Harness on every open
+        // so models released later show up without a plugin update.
+        useEffect(() => {
+          const controller = new AbortController();
+          void request('settings', {}, undefined, controller.signal).then(setModels).catch(() => {});
+          return () => controller.abort();
+        }, []);
+        useEffect(() => {
+          const current = models.current;
+          if (!current?.provider || !current?.model) {
+            setEfforts([]);
+            return undefined;
+          }
+          const controller = new AbortController();
+          void request('modelInfo', { provider: current.provider, model: current.model }, undefined, controller.signal)
+            .then(info => setEfforts(info.efforts ?? []))
+            .catch(() => setEfforts([]));
+          return () => controller.abort();
+        }, [models.current?.provider, models.current?.model]);
         // Workspaces added or removed in the DSH sidebar show up here: refresh
         // the library, follow the selected workspace, and drop a paper whose
         // workspace disappeared.
@@ -527,6 +548,15 @@ window.__ModuleLoader__.load({
             if (handle) await handle.task.destroy().catch(() => {});
             setBusy('');
           }
+        }
+
+        async function chooseModel(patch) {
+          const next = { ...models.current, ...patch };
+          try {
+            const saved = await request('settings', {}, next);
+            setModels(saved);
+            setEfforts([]);
+          } catch (e) { setError(e.message); }
         }
 
         async function retry() {
@@ -687,6 +717,28 @@ window.__ModuleLoader__.load({
                   h('output', { className: 'qr-zoom-value', 'aria-live': 'polite' }, `${zoom}%`),
                   h('button', { type: 'button', title: '放大文献', 'aria-label': '放大文献', disabled: zoom >= 300, onClick: () => changeZoom(zoom + 25) }, '＋'),
                   h('button', { type: 'button', title: '恢复 100%', disabled: zoom === 100, onClick: () => changeZoom(100) }, '重置')),
+                h('div', { className: 'qr-actions qr-model', role: 'group', 'aria-label': '翻译模型' },
+                  h('label', null, '模型 ',
+                    h('select', {
+                      value: models.current ? `${models.current.provider}::${models.current.model}` : '',
+                      'aria-label': '翻译模型',
+                      onChange: e => {
+                        const [provider, model] = e.target.value.split('::');
+                        void chooseModel({ provider, model, reasoningEffort: '' });
+                      },
+                    }, ...(models.providers ?? []).map(provider => h('optgroup', { key: provider.id, label: provider.name },
+                      provider.models.map(model => h('option', {
+                        key: `${provider.id}::${model.id}`, value: `${provider.id}::${model.id}`,
+                      }, model.name)))))),
+                  h('label', null, '推理 ',
+                    h('select', {
+                      value: models.current?.reasoningEffort ?? '',
+                      'aria-label': '推理强度',
+                      disabled: !efforts.length,
+                      onChange: e => void chooseModel({ reasoningEffort: e.target.value }),
+                    },
+                    h('option', { value: '' }, efforts.length ? '默认' : '不可调'),
+                    ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name))))),
                 h('div', { className: 'qr-actions', role: 'status' },
                   h('span', null, `全文翻译 ${paper.translated} / ${paper.expected ?? paper.paragraphs.length} 段`),
                   h('progress', { value: paper.translated, max: paper.expected ?? paper.paragraphs.length, 'aria-label': '全文翻译进度' }),
