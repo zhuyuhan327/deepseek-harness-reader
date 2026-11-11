@@ -1,5 +1,8 @@
 # 阅藏 · DeepSeek Harness 阅读插件
 
+[![test](https://github.com/zhuyuhan327/deepseek-harness-reader/actions/workflows/test.yml/badge.svg)](https://github.com/zhuyuhan327/deepseek-harness-reader/actions/workflows/test.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 适配 DeepSeek Harness 0.2.1-rc.5。打开侧栏的「阅读模式」，上传文字型英文 PDF 后，Harness 会为该文献创建一个原生工作区，并在主面板打开双语阅读。上传时启动全文翻译，阅读页会随着进度逐段显示译文。
 
 ## 功能
