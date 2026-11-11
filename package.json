@@ -1,0 +1,38 @@
+{
+  "name": "dsh-quiet-reader",
+  "version": "0.1.2",
+  "description": "阅藏：DeepSeek Harness 的双语论文阅读模式",
+  "type": "module",
+  "main": "./src/host.js",
+  "exports": {
+    ".": "./src/host.js",
+    "./client": "./src/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "cordis.patch.yml", "README.md", "LICENSE"],
+  "engines": { "node": ">=22.19.0", "dsh": "^0.2.1-rc.5" },
+  "keywords": ["dsh", "dsh-plugin", "pdf", "translation", "reader", "bilingual"],
+  "license": "MIT",
+  "author": "zhuyuhan327",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhuyuhan327/deepseek-harness-reader.git"
+  },
+  "homepage": "https://github.com/zhuyuhan327/deepseek-harness-reader#readme",
+  "bugs": {
+    "url": "https://github.com/zhuyuhan327/deepseek-harness-reader/issues"
+  },
+  "dependencies": { "pdfjs-dist": "5.6.205" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "scripts": { "test": "node --test" }
+}
