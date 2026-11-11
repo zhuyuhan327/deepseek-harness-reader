@@ -17,7 +17,19 @@
 
 ## 安装
 
-需要 Node.js ≥ 22.19.0、pnpm，以及 DeepSeek Harness 桌面端（本插件按 0.2.1-rc.5 的插件 API 编写）。
+### 方式一：下载 Release（推荐）
+
+从 [Releases](https://github.com/zhuyuhan327/deepseek-harness-reader/releases/latest) 下载 `dsh-quiet-reader-<version>.tgz`，然后执行：
+
+```powershell
+dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz
+```
+
+完全退出并重新打开 Harness，登录 DeepSeek 后从侧栏进入「阅读模式」。
+
+### 方式二：从源码 link 安装
+
+需要 Node.js ≥ 22.19.0 与 pnpm，以及 DeepSeek Harness 桌面端（本插件按 0.2.1-rc.5 的插件 API 编写）。
 
 1. 在插件目录安装依赖：
 
@@ -32,7 +44,7 @@
    & '<Harness 安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add "link:$readerPath"
    ```
 
-3. 完全退出并重新打开 Harness（安装时已经在运行的实例不会自动加载新插件），登录 DeepSeek 后从侧栏进入「阅读模式」。
+3. 完全退出并重新打开 Harness。
 
 已把 `dsh` 加入 PATH 时可以直接执行 `dsh plugin --profile desktop add "link:$readerPath"`。使用 Harness 的 Web profile 时，把 `--profile desktop` 换成 `--profile web`。
 
@@ -43,7 +55,7 @@ node --test
 pnpm pack
 ```
 
-生成的 `dsh-quiet-reader-<version>.tgz` 可以用 `dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz` 安装。发布到别处时请确认 `package.json` 的 `files` 覆盖 `src`、`cordis.patch.yml` 与 `README.md`。
+生成的 `dsh-quiet-reader-<version>.tgz` 可以用 `dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz` 安装。发布到别处时请确认 `package.json` 的 `files` 覆盖 `src`、`cordis.patch.yml`、`README.md` 与 `LICENSE`。
 
 ## 使用
 
