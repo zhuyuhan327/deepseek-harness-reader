@@ -353,10 +353,12 @@ window.__ModuleLoader__.load({
       let selectedPaper = '';
       // Cordis requires an explicit injection before a service can be read.
       let pickDirectory = null;
-      ctx.inject(['uiWorkspace'], scoped => {
-        pickDirectory = () => scoped.uiWorkspace.pickDirectory();
-        return () => { pickDirectory = null; };
-      });
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['uiWorkspace'], scoped => {
+          pickDirectory = () => scoped.uiWorkspace.pickDirectory();
+          return () => { pickDirectory = null; };
+        });
+      }
       const listeners = new Set();
       const refresh = signal => request('list', {}, undefined, signal);
       const choosePaper = id => {
