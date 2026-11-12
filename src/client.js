@@ -377,6 +377,7 @@ window.__ModuleLoader__.load({
         const [asking, setAsking] = useState(false);
         const [revision, setRevision] = useState(0);
         const [pending, setPending] = useState(null);
+        const [saveFolder, setSaveFolder] = useState('');
         const [fromPage, setFromPage] = useState('');
         const [toPage, setToPage] = useState('');
         const [exportOpen, setExportOpen] = useState(false);
@@ -507,6 +508,7 @@ window.__ModuleLoader__.load({
           const form = new FormData();
           form.set('pdf', chosen);
           form.set('document', JSON.stringify(parsed));
+          if (saveFolder.trim()) form.set('folder', saveFolder.trim());
           return request('import', {}, form);
         }
 

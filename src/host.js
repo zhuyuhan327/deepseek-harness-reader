@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, unlink, writeFile, readdir } from 'node:fs/promises';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -383,9 +384,20 @@ export function createReader(ctx, root) {
     }
   }
 
+  const storageFile = join(root, 'storages.json');
+  let storages;
+  const storageMap = () => {
+    if (storages) return storages;
+    try { storages = JSON.parse(readFileSync(storageFile, 'utf8')) ?? {}; } catch { storages = {}; }
+    return storages;
+  };
+  const saveStorageMap = () => {
+    try { writeFileSync(storageFile, JSON.stringify(storageMap())); } catch {}
+  };
+
   function directory(id) {
     if (!ID.test(id ?? '')) throw new ReaderError('文献编号无效。');
-    return join(root, id);
+    return storageMap()[id] ?? join(root, id);
   }
 
   async function paper(id) {
@@ -527,7 +539,15 @@ export function createReader(ctx, root) {
     assertIdle(id);
     const previous = imports.get(id);
     const task = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {
-      const path = directory(id);
+      let path = directory(id);
+      const folder = typeof form.get('folder') === 'string' ? form.get('folder').trim() : '';
+      if (!storageMap()[id] && folder) {
+        const safe = String(parsed.title || '论文').replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').trim().slice(0, 60) || '文献';
+        path = join(folder, `阅藏-${safe}`);
+        await mkdir(path, { recursive: true });
+        storageMap()[id] = path;
+        saveStorageMap();
+      }
       await mkdir(path, { recursive: true });
       const manifest = join(path, 'paper.json');
       const stored = await readJson(manifest, null);
@@ -698,6 +718,7 @@ export function createReader(ctx, root) {
               throw new ReaderError('工作区删除失败，文献文件已保留。请重试。', 502);
             }
             await rm(directory(id), { recursive: true, force: true });
+            delete storageMap()[id]; saveStorageMap();
             return { deleted: document.id };
           }));
         }
