@@ -56,7 +56,7 @@
 .qr-pair .qr-zh { margin: 0; line-height: 1.8; }
 .qr-pair .qr-zh, .qr-selected-text .qr-spread p + p {
   font-family: var(--qr-translation-font);
-  font-weight: 600;
+  font-weight: 400;
   color: var(--text-primary, CanvasText);
 }
 .qr-pair.heading .qr-en, .qr-pair.heading .qr-zh { font-weight: 700; font-size: 1.15em; }

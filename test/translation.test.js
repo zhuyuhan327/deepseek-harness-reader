@@ -69,6 +69,44 @@ test('重复正文复用已验证结果', async () => {
   assert.equal(translations[2], translations[1]);
 });
 
+test('清楚可判为简体中文的原段落原样保留，繁体和中英混合段落仍翻译', async () => {
+  const translations = {};
+  const document = { paragraphs: [
+    { ...paragraph(1), text: '这篇论文介绍了图像重建方法。' },
+    { ...paragraph(2), text: '這篇論文介紹了圖像重建方法。' },
+    { ...paragraph(3), text: '图像重建 Reconstruction produces a clearer image.' },
+  ] };
+  await translateDocument({
+    document, translations, signal: new AbortController().signal, save: async () => {},
+    async request(_system, data, _maxTokens, { phase }) {
+      assert.equal(phase, 'initial');
+      assert.deepEqual(data.paragraphs.map(p => p.id), [2, 3]);
+      return { text: '{"2":"这篇论文介绍了图像重建方法。","3":"图像重建得到更清晰的图像。"}', finished: true };
+    },
+  });
+  assert.equal(translations[1], document.paragraphs[0].text);
+  assert.equal(Object.keys(translations).length, 3);
+});
+
+test('多批漏项合并补译，只重发未保存的段落', async () => {
+  const translations = {};
+  const repairIds = [];
+  const missed = new Set([2, 4, 15, 19]);
+  const failures = await translateDocument({
+    document: { paragraphs: Array.from({ length: 28 }, (_, i) => paragraph(i + 1)) },
+    translations, signal: new AbortController().signal, save: async () => {},
+    async request(_system, data, _maxTokens, { phase }) {
+      const ids = data.paragraphs.map(p => p.id);
+      if (phase === 'repair') repairIds.push(ids);
+      const accepted = phase === 'initial' ? ids.filter(id => !missed.has(id)) : ids;
+      return { text: JSON.stringify(Object.fromEntries(accepted.map(id => [id, '本节介绍重建方法。']))), finished: true };
+    },
+  });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(repairIds, [[2, 4, 15, 19]]);
+  assert.equal(Object.keys(translations).length, 28);
+});
+
 test('连续空回复和超长回复只标记失败段落，后续批次仍能完成', async () => {
   for (const code of ['NO_CONTENT', 'OUTPUT_LIMIT']) {
     const translations = {};
@@ -85,11 +123,11 @@ test('连续空回复和超长回复只标记失败段落，后续批次仍能�
     assert.deepEqual(failures.map(item => item.id), Array.from({ length: 14 }, (_, i) => i + 1));
     assert.equal(Object.keys(translations).length, 16);
     assert.ok(translations[30]);
-    assert.equal(calls, 17);
+    assert.equal(calls, 5);
   }
 });
 
-test('公式密集段落分批翻译文字片段，拼回后全部变量可重新校验', async () => {
+test('公式密集段落复用公式上下文相同的片段，拼回后全部变量可重新校验', async () => {
   const item = { id: 2, page: 1, kind: 'text', text: 'Estimate σ and ϵ from observation α. '.repeat(60).trim() };
   const translations = {};
   let fragmentCalls = 0;
@@ -104,11 +142,48 @@ test('公式密集段落分批翻译文字片段，拼回后全部变量可重�
     },
   });
   assert.deepEqual(failures, []);
-  assert.ok(fragmentCalls > 1);
+  assert.equal(fragmentCalls, 1);
   assert.equal((translations[2].match(/σ/g) ?? []).length, 60);
   assert.equal((translations[2].match(/ϵ/g) ?? []).length, 60);
   assert.equal((translations[2].match(/α/g) ?? []).length, 60);
   assert.equal(validateTranslation(item, translations[2]).text, translations[2]);
+});
+
+test('不同变量之间的短片段在补译预算内合并发送', async () => {
+  const item = { ...paragraph(1), text: Array.from({ length: 30 }, (_, i) => `Estimate x_${i} and y_${i}.`).join(' ') };
+  const translations = {};
+  const parts = { Estimate: '估计', and: '和', '. Estimate': '。估计' };
+  let fragmentCalls = 0;
+  const failures = await translateDocument({
+    document: { paragraphs: [item] }, translations, signal: new AbortController().signal, save: async () => {},
+    async request(_system, data, _maxTokens, { phase }) {
+      if (phase !== 'fragments') return { text: '{}', finished: true };
+      fragmentCalls++;
+      return { text: JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, parts[p.text]]))), finished: true };
+    },
+  });
+  assert.deepEqual(failures, []);
+  assert.ok(fragmentCalls > 0 && fragmentCalls <= 3);
+  assert.match(translations[1], /x_29 和 y_29/);
+  assert.equal(validateTranslation(item, translations[1]).text, translations[1]);
+});
+
+test('模型反复漏掉公式时控制片段请求总量，并留下可继续补译的段落', async () => {
+  const translations = {};
+  const document = { paragraphs: Array.from({ length: 10 }, (_, i) => ({
+    ...paragraph(i + 1), text: `Estimate σ for the reconstruction case ${i + 1}.`,
+  })) };
+  const phases = [];
+  const failures = await translateDocument({
+    document, translations, signal: new AbortController().signal, save: async () => {},
+    async request(_system, _data, _maxTokens, { phase }) {
+      phases.push(phase);
+      return { text: '{}', finished: true };
+    },
+  });
+  assert.deepEqual(phases, ['initial', 'repair', 'repair', 'fragments', 'fragments', 'fragments']);
+  assert.equal(failures.length, 10);
+  assert.deepEqual(translations, {});
 });
 
 test('未完成的编号回复不保存半句，单段重试后保存完整译文', async () => {

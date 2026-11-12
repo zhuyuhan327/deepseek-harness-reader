@@ -21,6 +21,7 @@ export function isTranslatable(kind = KIND_TEXT) {
 }
 
 const ARXIV_STAMP = /\barxiv\s*:\s*\d{4}\.\d{4,5}/i;
+const PROCEEDINGS_WATERMARK = /^(?:This (?:CVPR|ICCV|WACV) paper is the Open Access version\b|Except for this watermark, it is identical to the accepted version\b)/i;
 const EMAIL = /[^\s@]+@[^\s@]+\.[a-z]{2,}/i;
 const CAPTION_LABEL = /^(?:fig(?:ure)?|table|exhibit)\.?\s*(?:[A-Z]?\d+(?:[.-]\d+)*|[IVX]+)(?=$|[\s.:)–—-])/i;
 const ALGORITHM = /^(?:algorithm|scheme|listing)\s*\d+\s*[:.]/i;
@@ -33,6 +34,8 @@ const MATH_SYMBOL = /[=+<>^_{}|×÷±≈≤≥≠∑∏∫√∞∂∇∈∉⊂�
 const OPTIMIZATION_OPERATOR = /\barg\s*(?:min|max)(?=$|[\sA-Z_([{\p{Script=Greek}])/gu;
 const NUMERIC_CELL = /^[+−-]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:%|[eE][+−-]?\d+)?$/;
 const EQUATION_TAG = /^\([A-Z]?\d+(?:\.\d+)*[a-z]?\)$/;
+const EQUATION_BRACE = /[⏟⏞]|\{+\s*z/u;
+const COMPLEXITY_RANGE = /^from O\([A-Za-z0-9²³^/]+\) to O\([A-Za-z0-9²³^/]+\)?$/;
 const ABSTRACT_START = /^abstract\b/i;
 // Section headings are recognizable without font data: short, no closing period,
 // either an outline number/letter plus a capitalised word or a standard section
@@ -85,7 +88,7 @@ function isCaption(text) {
 export function looksLikeMath(text) {
   const value = flat(text);
   if (!value || hasProse(value.replace(OPTIMIZATION_OPERATOR, ''))) return false;
-  if (EQUATION_TAG.test(value) || numericRow(value)) return true;
+  if (EQUATION_TAG.test(value) || COMPLEXITY_RANGE.test(value) || numericRow(value)) return true;
   if (PROSE_START.test(value)) return false;
   const symbols = value.match(MATH_SYMBOL)?.length ?? 0;
   const tokens = value.split(/\s+/);
@@ -165,7 +168,10 @@ function regionKind(box, regions) {
 }
 
 function explainsInlineMath(paragraph, next, regions) {
-  if (next?.page !== paragraph.page || !next.mathSpans?.some(span => span.start <= 2)) return false;
+  if (next?.page !== paragraph.page) return false;
+  const leadingMath = next.mathSpans?.some(span => span.start <= 2);
+  const trailingVariable = paragraph.mathSpans?.some(span => span.start > 5 && span.end === paragraph.text.length);
+  if (!leadingMath && !trailingVariable) return false;
   const size = paragraph.style?.size;
   const nextSize = next.style?.size;
   if (!size || !nextSize || Math.abs(size - nextSize) > size * .12) return false;
@@ -173,6 +179,36 @@ function explainsInlineMath(paragraph, next, regions) {
   const [left, nextTop] = next.lines?.[0] ?? next.box;
   return left >= right && left - right < 0.12 && Math.abs(nextTop - top) < (bottom - top) * .35
     && readable(next.text) && !looksLikeMath(next.text) && !regionKind(next.box, regions);
+}
+
+function runInHeading(paragraph, text, next, regions) {
+  const style = paragraph.style;
+  const body = next?.style;
+  if (!style?.bold || !style.size || next?.page !== paragraph.page || body?.bold || !body?.size
+      || !/^[A-Z][^.]{1,84}\.$/.test(text) || !/^[A-Za-z]{2}/.test(next.text)
+      || Math.abs(style.size - body.size) > style.size * .12 || style.fontFamily !== body.fontFamily) return false;
+  const [, top, right, bottom] = paragraph.box;
+  const [left, nextTop] = next.lines?.[0] ?? next.box;
+  const gap = left - right;
+  return gap >= 0 && gap < .07 && Math.abs(nextTop - top) < (bottom - top) * .28
+    && !regionKind(next.lines?.[0] ?? next.box, regions);
+}
+
+function equationAnnotation(paragraph, text, index, paragraphs, kinds, bodySize) {
+  const size = paragraph.style?.size;
+  if (!size || size > bodySize * .82 || text.length > 48 || !/^[A-Za-z]+(?: [A-Za-z]+)+$/.test(text)) return false;
+  const [left, top, right, bottom] = paragraph.box;
+  const height = bottom - top;
+  for (let i = index - 1; i >= Math.max(0, index - 8); i--) {
+    const equation = paragraphs[i];
+    if (equation.page !== paragraph.page) break;
+    if (kinds[i] !== KIND_FORMULA || !EQUATION_BRACE.test(equation.text)) continue;
+    const [eqLeft, eqTop, eqRight, eqBottom] = equation.box;
+    const gap = top - eqBottom;
+    const shared = Math.min(right, eqRight) - Math.max(left, eqLeft);
+    if (shared > (right - left) * .5 && top - eqTop > height && gap >= -height * .6 && gap <= height * .8) return true;
+  }
+  return false;
 }
 
 /**
@@ -224,6 +260,7 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
   paragraphs.forEach((paragraph, index) => {
     const text = flat(paragraph.text);
     if (!text || ARXIV_STAMP.test(text) || DATE_ONLY.test(text)) return;
+    if (paragraph.page === 1 && paragraph.box[1] < .08 && PROCEEDINGS_WATERMARK.test(text)) return;
     if (REFERENCE_HEADING.test(text)) {
       inReferences = true;
       return;
@@ -254,17 +291,18 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
       kinds[index] = within ?? KIND_TABLE;
       return;
     }
-    if (looksLikeMath(text)) {
+    const base = bodySize.get(paragraph.page) ?? 0;
+    if (looksLikeMath(text) || equationAnnotation(paragraph, text, index, paragraphs, kinds, base)) {
       kinds[index] = KIND_FORMULA;
       return;
     }
     if (!readable(text)) return;
-    if (paragraph === title || paragraph === appendixTitle || (!PROSE_START.test(text) && headingCandidate(text))) {
+    if (paragraph === title || paragraph === appendixTitle || (!PROSE_START.test(text) && headingCandidate(text))
+        || runInHeading(paragraph, text, paragraphs[index + 1], onPage)) {
       kinds[index] = KIND_HEADING;
       return;
     }
     const style = paragraph.style;
-    const base = bodySize.get(paragraph.page) ?? 0;
     if (style && text.length <= 160 && base > 0 && !PROSE_START.test(text) && !/[.!?。！？]$/.test(text)) {
       const bigger = Number(style.size) >= base * 1.18;
       const boldHead = Boolean(style.bold) && Number(style.size) >= base * 0.98;
@@ -278,7 +316,8 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
       return;
     }
     const narrow = width < 0.09 || (width < 0.14 && height < 0.03);
-    const connective = /^where$/i.test(text) && explainsInlineMath(paragraph, paragraphs[index + 1], onPage);
+    const connective = /^where(?: [A-Za-z]\w{0,3}(?:\([a-z0-9]{1,3}\))?)?$/i.test(text)
+      && explainsInlineMath(paragraph, paragraphs[index + 1], onPage);
     if (narrow && !hasProse(text) && !connective) return;
     kinds[index] = KIND_TEXT;
   });

@@ -12,6 +12,17 @@ test('正文和译文中的论文引用不会增加句子计数', () => {
   assert.equal(looksComplete('First sentence here. Second sentence follows. Third sentence ends.', '只译了第一句。'), false);
 });
 
+test('完整保留带小数点的章节编号，比较级中的冠词仍可翻译', () => {
+  const paragraph = { id: 541, text: 'See Sec. S3.5 and Sec. S3.5.1. We achieve a >1000× speedup with η = 1.' };
+  const protectedText = protectMath(paragraph.text, [], paragraph.id);
+  assert.deepEqual(protectedText.tokens.map(token => token.value), ['S3.5', 'S3.5.1', '>1000×', 'η = 1']);
+  assert.equal(validateTranslation(paragraph, paragraph.text).text, paragraph.text);
+  assert.equal(validateTranslation(paragraph, '见第 S3.5 节及第 S3.5.1 节。在 η = 1 时实现 >1000× 加速。').reason, undefined);
+  assert.equal(validateTranslation(paragraph, protectedText.text, protectedText.tokens).text, paragraph.text);
+  assert.equal(validateTranslation(paragraph, '见第 S3.6 节及第 S3.5.1 节。在 η = 1 时实现 >1000× 加速。').reason, 'math');
+  assert.deepEqual(protectMath('The parameter a >1000 is constrained.').tokens.map(token => token.value), ['a >1000']);
+});
+
 test('回填允许明确的等价标记拼写，并拒绝缺失、重复、换序和跨段标记', () => {
   const paragraph = { id: 3, text: 'The parameters σ and ϵ are used here [1].' };
   const { tokens } = protectMath(paragraph.text, [], paragraph.id);

@@ -31,8 +31,8 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   await writeFile(join(path, 'original.pdf'), pdf);
   await writeFile(join(path, 'translations.json'), JSON.stringify(translations));
   await writeFile(manifest, JSON.stringify({
-    id, title: 'Layout upgrade fixture', workspaceId: 'fixture-workspace', schema: 3,
-    layoutVersion: 1, layoutPages: [1, 2], importedPages: [1, 2], lastParagraphId: 2,
+    id, title: 'Layout upgrade fixture', workspaceId: 'fixture-workspace', schema: 4,
+    layoutVersion: 2, layoutPages: [1, 2], importedPages: [1, 2], lastParagraphId: 2,
     range: { first: 1, last: 2 }, pages,
     paragraphs: [paragraph(1, 1, first), paragraph(2, 2, previousSecond)],
   }));
@@ -54,21 +54,21 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   }
 
   const newBox = [.14, .21, .86, .26];
-  const upgradedFirst = await upload(2, paragraph(1, 1, first, newBox));
-  assert.equal(upgradedFirst.layoutVersion, 2);
+  const upgradedFirst = await upload(3, paragraph(1, 1, first, newBox));
+  assert.equal(upgradedFirst.layoutVersion, 3);
   assert.deepEqual(upgradedFirst.layoutPages, [1]);
   assert.deepEqual(upgradedFirst.translations, { 1: translations[1] });
   assert.deepEqual(upgradedFirst.paragraphs[0].box, newBox);
   const partial = JSON.parse(await readFile(manifest, 'utf8'));
   assert.equal(partial.paragraphs.find(p => p.id === 2).text, previousSecond);
 
-  const legacyThird = await upload(1, paragraph(1, 3, 'The third page is newly imported from the old client.'));
-  assert.equal(legacyThird.layoutVersion, 2);
+  const legacyThird = await upload(2, paragraph(1, 3, 'The third page is newly imported from the old client.'));
+  assert.equal(legacyThird.layoutVersion, 3);
   assert.deepEqual(legacyThird.layoutPages, [1]);
   assert.deepEqual(legacyThird.paragraphs.map(p => p.id), [3]);
 
-  const upgradedSecond = await upload(2, paragraph(1, 2, revisedSecond));
-  assert.equal(upgradedSecond.layoutVersion, 2);
+  const upgradedSecond = await upload(3, paragraph(1, 2, revisedSecond));
+  assert.equal(upgradedSecond.layoutVersion, 3);
   assert.deepEqual(upgradedSecond.layoutPages, [1, 2]);
   assert.deepEqual(upgradedSecond.paragraphs.map(p => [p.id, p.text]), [[4, revisedSecond]]);
   assert.deepEqual(upgradedSecond.translations, {});

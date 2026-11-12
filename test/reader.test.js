@@ -184,11 +184,11 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   };
   const first = await upload(1);
   const saved = await host.until(first.id, 'complete');
-  const reanalyzed = await upload(1, 2);
+  const reanalyzed = await upload(1, 3);
   assert.deepEqual(reanalyzed.layoutPages, [1]);
   assert.deepEqual(reanalyzed.translations, saved.translations);
 
-  const second = await upload(2, 2);
+  const second = await upload(2, 3);
   assert.equal(second.id, first.id);
   assert.equal(second.workspaceId, first.workspaceId);
   assert.deepEqual(second.range, { first: 2, last: 2 });
@@ -197,7 +197,7 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   await host.request('translate', second.id, {});
   assert.equal((await host.until(second.id, 'complete')).translated, 1);
 
-  const reopened = await upload(1, 2);
+  const reopened = await upload(1, 3);
   assert.deepEqual(reopened.translations, saved.translations);
   assert.equal(host.calls.length, 2);
 });
@@ -473,7 +473,7 @@ test('可以选择模型与推理强度并在翻译时使用', async t => {
   assert.deepEqual(info.efforts.map(effort => effort.id), ['off', 'high']);
 
   const saved = (await host.request('settings', null, {
-    provider: 'deepseek-account', model: 'test-pro', reasoningEffort: 'high',
+    provider: 'deepseek-account', model: 'test-pro', reasoningEffort: 'high', translationMode: 'custom',
   })).value;
   assert.equal(saved.current.model, 'test-pro');
   assert.equal(saved.current.reasoningEffort, 'high');
@@ -482,6 +482,22 @@ test('可以选择模型与推理强度并在翻译时使用', async t => {
   await host.until(paper.id, 'complete');
   assert.equal(host.requests[0].model, 'test-pro');
   assert.equal(host.requests[0].reasoningEffort, 'high');
+});
+
+test('省费模式只关闭翻译思考，问答仍保留选定模型与推理强度', async t => {
+  const host = await harness(t);
+  await host.request('settings', null, {
+    provider: 'deepseek-account', model: 'test-pro', reasoningEffort: 'high',
+  });
+  const paper = await host.upload('Economy translation', 2);
+  const completed = await host.until(paper.id, 'complete');
+  assert.equal(host.requests[0].model, 'test-pro');
+  assert.equal(host.requests[0].reasoningEffort, 'off');
+  assert.equal(completed.translationStats.requests, 1);
+  assert.ok(completed.translationStats.inputChars > 0);
+  assert.equal(completed.translationStats.repairs, 0);
+  await host.request('ask', paper.id, { question: '论文有什么结论？' });
+  assert.equal(host.requests.at(-1).reasoningEffort, 'high');
 });
 
 test('宿主拒绝跨站请求', async t => {

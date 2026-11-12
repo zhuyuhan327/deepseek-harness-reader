@@ -229,6 +229,7 @@ function buildLine(runs) {
   }
   return {
     box, text, baseline, size, mathSpans,
+    runs: mathSpans.length ? runs : undefined,
     mathRatio: mathSpans.reduce((count, span) => count + span.end - span.start, 0) / text.length,
     bold: bold > text.length * .52, italic: italic > text.length * .52,
     fontFamily: [...families].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'serif',
@@ -304,6 +305,8 @@ function tableBoxes(rows, rules, viewport, typical) {
 
   // Unruled tables have stable cell anchors and a concentration of numeric
   // values across multiple short rows. Require all cues before suppressing text.
+  // Exclude ruled cells before grouping a baseline shared with another column.
+  const ruled = boxes.slice();
   const numeric = /^[+−-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*(?:[%±×]|\(\d+\)))?/u;
   let block = [];
   const add = () => {
@@ -311,7 +314,8 @@ function tableBoxes(rows, rules, viewport, typical) {
     block = [];
   };
   for (const row of rows) {
-    const cells = row.filter(line => line.text.length < 36 && !CAPTION.test(line.text));
+    const cells = row.filter(line => line.text.length < 36 && !CAPTION.test(line.text)
+      && !ruled.some(box => overlaps(line.box, box, .68)));
     const previous = block.at(-1);
     const likely = cells.length >= 3 && cells.filter(line => numeric.test(line.text)).length >= 2;
     const connected = likely && previous && cells[0].baseline - previous[0].baseline < typical * 2.35
@@ -392,9 +396,26 @@ function orderLines(lines, gutter, pageWidth, typical, pageNumber) {
   return ordered;
 }
 
+function sameFontSize(first, second) {
+  return Math.abs(first.size - second.size) <= Math.max(first.size, second.size) * .12;
+}
+
 function sameTextStyle(first, second) {
-  return Math.abs(first.size - second.size) <= Math.max(first.size, second.size) * .12
-    && first.bold === second.bold && first.italic === second.italic && first.fontFamily === second.fontFamily;
+  return sameFontSize(first, second) && first.bold === second.bold
+    && first.italic === second.italic && first.fontFamily === second.fontFamily;
+}
+
+function markRunInHeadings(rows) {
+  for (const row of rows) {
+    row.forEach((line, index) => {
+      const next = row[index + 1];
+      if (!line.bold || line.region || !next || next.bold || next.region) return;
+      const gap = next.box[0] - line.box[2];
+      if (/^[A-Z][^.]{1,84}\.$/.test(line.text) && /^[A-Za-z]{2}/.test(next.text)
+          && gap >= 0 && gap <= line.size * 2 && sameFontSize(line, next)
+          && line.fontFamily === next.fontFamily) line.runInHeading = true;
+    });
+  }
 }
 
 function rejoinJustifiedRows(rows, gutter, regions) {
@@ -428,6 +449,103 @@ function rejoinJustifiedRows(rows, gutter, regions) {
   });
 }
 
+function splitEquationProse(lines) {
+  const tails = new Map();
+  const result = [];
+  for (const [index, line] of lines.entries()) {
+    if (tails.has(index)) result.push(tails.get(index));
+    const split = line.region ? -1 : (line.runs?.findIndex((run, i) => i >= 2 && !run.font.math
+      && !run.font.mathBase && /^[,.]\s+(?:where|as)\b/i.test(run.text)) ?? -1);
+    if (split < 0) {
+      result.push(line);
+      continue;
+    }
+    const formula = line.runs.slice(0, split);
+    const hasProse = formula.some(run => run.size >= line.size * .84 && !run.font.math && !run.font.mathBase
+      && /[A-Za-z]{3}/.test(run.text));
+    if (hasProse || formula.filter(run => run.font.math || run.font.mathBase).length < 2) {
+      result.push(line);
+      continue;
+    }
+    const tailRuns = line.runs.slice(split);
+    // Keep a numeric operand in the same original crop as its arrow.
+    const suffix = tailRuns.map((run, i) => /^\d+$/.test(run.text) && /[→←]$/.test(tailRuns[i - 1]?.text ?? '')
+      ? { ...run, font: { ...run.font, math: true } } : run);
+    const tail = { ...buildLine(suffix), equationProse: true };
+    let following = index + 1;
+    while (following < lines.length && following <= index + 6) {
+      const candidate = lines[following];
+      const near = Math.abs(candidate.baseline - line.baseline) < line.size * .6;
+      if (!near || candidate.region || !candidate.mathSpans.length || candidate.mathRatio < .62
+          || candidate.box[0] < line.box[0] - line.size * 15 || candidate.box[2] > tail.box[2] + line.size) break;
+      following++;
+    }
+    const continuation = lines[following];
+    if (continuation && !tails.has(following) && (continuation.text.match(/[A-Za-z]{3,}/g)?.length ?? 0) >= 4
+        && joinLines(tail, continuation, [tail])) {
+      result.push(buildLine(formula));
+      tails.set(following, tail);
+    } else {
+      result.push(line);
+    }
+  }
+  return result;
+}
+
+function attachTrailingIndices(lines) {
+  const ordered = [];
+  for (const line of lines) {
+    const script = ordered.at(-1);
+    const variable = line.mathSpans.at(-1);
+    if (!line.region && script && !script.region && script.mathSpans.length && line.mathSpans.length === 1
+        && variable && /^[a-z]{2,} [A-Za-z]$/.test(line.text)
+        && variable.start === line.text.length - 1 && variable.end === line.text.length
+        && script.size < line.size * .84 && /^\([a-z0-9]{1,3}\)$/.test(script.text)
+        && script.baseline < line.baseline && line.baseline - script.baseline < line.size * .82) {
+      const gap = script.box[0] - variable.box[2];
+      if (gap >= -line.size * .08 && gap <= line.size * .28) {
+        const text = line.text + script.text;
+        const span = { ...variable, end: text.length, box: union(variable.box, script.box) };
+        ordered.pop();
+        ordered.push({ ...line, text, box: union(line.box, script.box), mathSpans: [span],
+          mathRatio: (span.end - span.start) / text.length });
+        continue;
+      }
+    }
+    ordered.push(line);
+  }
+  return ordered;
+}
+
+function orderInlineContinuations(lines, gutter) {
+  const ordered = [];
+  for (const line of lines) {
+    let position = ordered.length;
+    // Superscripts can sort ahead of the prose on the baseline they belong to.
+    if (!line.region && !line.mathSpans.length && width(line.box) < line.size * 8
+        && /^(?:[a-z]{2,} ){1,3}(?:as|by|of|with)$/.test(line.text)) {
+      while (position > 0) {
+        const fragment = ordered[position - 1];
+        const gap = fragment.box[0] - line.box[2];
+        const sameColumn = gutter === null || (center(fragment.box) < gutter) === (center(line.box) < gutter);
+        if (fragment.region || !fragment.mathSpans.length || fragment.text.length > 20 || !sameColumn
+            || gap < 0 || gap > line.size * 8 || Math.abs(fragment.baseline - line.baseline) > line.size * .82) break;
+        position--;
+      }
+      const preceding = ordered[position - 1];
+      if (position < ordered.length && preceding && /\b(?:a|an|the)$/i.test(preceding.text)
+          && Math.abs(preceding.box[0] - line.box[0]) <= line.size * .25
+          && ordered.slice(position).every(fragment => fragment.box[2] <= preceding.box[2] + line.size * .2)
+          && joinLines(preceding, line, [preceding])) {
+        ordered.splice(position, 0, line);
+        continue;
+      }
+    }
+    ordered.push(line);
+  }
+  return ordered;
+}
+
 function joinLines(previous, line, block) {
   const dy = line.baseline - previous.baseline;
   const size = Math.max(previous.size, line.size);
@@ -435,8 +553,16 @@ function joinLines(previous, line, block) {
   const shared = Math.min(previous.box[2], line.box[2]) - Math.max(previous.box[0], line.box[0]);
   const shortLine = block.length > 1 && previous.box[2] < Math.max(...block.map(item => item.box[2])) - size * 3.5;
   const indent = block.length === 1 && LIST_ITEM.test(previous.text) ? size * 2.4 : size * .8;
-  return !line.region && !previous.region && line.mathRatio < .62 && previous.mathRatio < .62
-    && dy > size * .52 && dy < size * 1.61 && dx > -size * 2.3 && dx < indent
+  // A sentence can start in the space to the right of an inline heading or at
+  // the end of the preceding sentence, then wrap to the left column margin.
+  const wrapsFromRight = block.length === 1 && !previous.bold && dx <= -size * 2.3
+    && (previous.equationProse || (/^[A-Z]/.test(previous.text)
+      && previous.text.split(/\s+/).length <= 3 && width(previous.box) < size * 8))
+    && !/[.!?;:]$/.test(previous.text) && /^[a-z]{2}/.test(line.text)
+    && Math.abs(previous.box[2] - line.box[2]) <= size * .35 && width(previous.box) < width(line.box) * .75;
+  return !line.region && !previous.region && !line.runInHeading && !previous.runInHeading
+    && line.mathRatio < .62 && previous.mathRatio < .62 && dy > size * .52 && dy < size * 1.61
+    && ((dx > -size * 2.3 && dx < indent) || wrapsFromRight)
     && sameTextStyle(previous, line)
     && shared > Math.min(width(line.box), width(previous.box)) * .52
     && !CAPTION.test(line.text) && !NEW_BLOCK.test(line.text)
@@ -503,8 +629,11 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   for (const line of lines) {
     if (!CAPTION.test(line.text)) line.region = regions.find(({ box }) => overlaps(line.box, box));
   }
+  markRunInHeadings(validRows);
   const gutter = findGutter(lines, viewport.width, typical);
   const joined = rejoinJustifiedRows(validRows, gutter, regions);
-  const paragraphs = assembleParagraphs(orderLines(joined, gutter, viewport.width, typical, number), viewport, number, normalize);
+  const ordered = orderLines(joined, gutter, viewport.width, typical, number);
+  const separated = splitEquationProse(ordered);
+  const paragraphs = assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }

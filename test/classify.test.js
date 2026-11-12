@@ -41,6 +41,7 @@ test('数学行与普通句子的区分', () => {
   assert.equal(looksLikeMath('The method improves PSNR by 2 dB on average.'), false);
   assert.equal(looksLikeMath('Let x = y + z.'), false);
   assert.equal(looksLikeMath('When θ ≤ 0, set x = 0.'), false);
+  assert.equal(looksLikeMath('from O(N) to O(N'), true);
 });
 
 test('独立优化方程保留原图，描述优化过程的正文照常翻译', () => {
@@ -67,6 +68,30 @@ test('与同一行的公式说明相连的 where 可翻译，孤立词和公式�
   assert.deepEqual(classifyParagraphs(paragraphs.slice(0, 2), regions), ['skip', 'table']);
 });
 
+test('句首和公式变量拆成窄块时仍翻译句首', () => {
+  const style = { size: 10 };
+  const paragraphs = [
+    { ...paragraph(1, 3, [0.52, 0.395, 0.58, 0.408], 'where R(i)'), style, mathSpans: [{ start: 6, end: 10 }] },
+    { ...paragraph(2, 3, [0.60, 0.395, 0.90, 0.408], 'is a matrix that copies the center pixel of the'), style },
+    { ...paragraph(3, 3, [0.52, 0.430, 0.58, 0.443], 'where R'), style },
+    { ...paragraph(4, 3, [0.60, 0.430, 0.90, 0.443], 'is a matrix that copies the center pixel of the'), style },
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'text', 'skip', 'text']);
+});
+
+test('下括号正下方的小字号注释和公式一起保留，邻栏正文可翻译', () => {
+  const prose = { size: 10 };
+  const small = { size: 7 };
+  const paragraphs = [
+    { ...paragraph(1, 3, [0.52, 0.313, 0.90, 0.343], 'Each patch is denoised using the following operator.'), style: prose },
+    { ...paragraph(2, 3, [0.75, 0.342, 0.90, 0.370], '|X − {{zx(i)}}, t). (7)'), style: prose },
+    { ...paragraph(3, 3, [0.74, 0.368, 0.85, 0.376], 'all other noisy patches'), style: small },
+    { ...paragraph(4, 3, [0.12, 0.368, 0.24, 0.376], 'all other noisy patches'), style: small },
+    { ...paragraph(5, 3, [0.52, 0.379, 0.90, 0.400], 'The output image is then assembled from the patches.'), style: prose },
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'formula', 'formula', 'text', 'text']);
+});
+
 test('标题按字号与粗体识别，正文与图注仍按原规则分类', () => {
   const p = (id, box, text, style) => ({ id, page: 1, box, text, ...(style ? { style } : {}) });
   const paragraphs = [
@@ -77,6 +102,17 @@ test('标题按字号与粗体识别，正文与图注仍按原规则分类', ()
     p(5, [0.18, 0.55, 0.82, 0.58], 'where A is a known forward operator and x is the unknown solution.', { size: 10, bold: false, align: 'left' }),
   ];
   assert.deepEqual(classifyParagraphs(paragraphs), ['heading', 'heading', 'text', 'caption', 'text']);
+});
+
+test('同一行正文前的粗体短标题可翻译，孤立的粗体图例保留', () => {
+  const style = { size: 10, fontFamily: 'serif' };
+  const paragraphs = [
+    { ...paragraph(1, 7, [0.52, 0.72, 0.63, 0.733], 'Symmetrization.'), style: { ...style, bold: true } },
+    { ...paragraph(2, 7, [0.65, 0.72, 0.90, 0.765], 'We add constraints during the diffusion process.'),
+      lines: [[0.65, 0.72, 0.90, 0.733], [0.52, 0.735, 0.90, 0.75]], style },
+    { ...paragraph(3, 7, [0.52, 0.80, 0.63, 0.813], 'Symmetrization.'), style: { ...style, bold: true } },
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['heading', 'text', 'skip']);
 });
 
 test('布局区域识别图中文字和表格单元，图表注释及区域外正文照常翻译', () => {
@@ -110,6 +146,16 @@ test('页码范围首段保持正文，跨页重复正文保留，页眉按位�
   ]);
   assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'text', 'text', 'skip', 'text', 'text', 'skip', 'text', 'text']);
   assert.deepEqual(classifyParagraphs([paragraphs[1]]), ['text']);
+});
+
+test('首页的两段开放获取水印完整保留，正文同样的措辞仍可翻译', () => {
+  const disclaimer = 'Except for this watermark, it is identical to the accepted version; the final published version of the proceedings is available on IEEE Xplore.';
+  const paragraphs = [
+    paragraph(1, 1, [0.22, 0.005, 0.78, 0.016], 'This CVPR paper is the Open Access version, provided by the Computer Vision Foundation.'),
+    paragraph(2, 1, [0.27, 0.019, 0.73, 0.045], disclaimer),
+    paragraph(3, 2, [0.11, 0.29, 0.43, 0.35], disclaimer),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'skip', 'text']);
 });
 
 test('文中编号引文可翻译，参考文献之后的多级附录恢复翻译', () => {

@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
       const metadata = await handle.document.getMetadata().catch(() => ({}));
       const embeddedTitle = metadata.info?.Title;
       const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || String(filename ?? 'paper').replace(/\.pdf$/i, '');
-      return { title, pages, paragraphs, regions, layoutVersion: 2, range: { first, last } };
+      return { title, pages, paragraphs, regions, layoutVersion: 3, range: { first, last } };
     }
 
     function place(box) {
@@ -150,7 +150,8 @@ window.__ModuleLoader__.load({
       if (!response.ok) throw new Error('无法读取原始 PDF。');
       const data = new Uint8Array(await response.arrayBuffer());
       if (mode === 'original' && first === 1 && last === paper.pages.length) return data;
-      const [{ paintTranslation }, { buildJpegPdf }] = await Promise.all([loadPresentation(), loadExporter()]);
+      const [{ paintTranslation, documentBodySize, expectedOverlays }, { buildJpegPdf }] = await Promise.all([loadPresentation(), loadExporter()]);
+      const bodySize = documentBodySize(paper.paragraphs);
       await document.fonts?.ready;
       const handle = await openPdf(data);
       const pages = [];
@@ -172,7 +173,10 @@ window.__ModuleLoader__.load({
             if (mode !== 'original') {
               const paragraphs = paper.paragraphs.filter(p => p.page === number);
               const regions = (paper.regions ?? []).filter(region => region.page === number);
-              textLines = paintTranslation(translated, source, base, paragraphs, paper.translations, regions);
+              textLines = paintTranslation(translated, source, base, paragraphs, paper.translations, regions, bodySize);
+              const painted = new Set(textLines.map(line => line.paragraphId));
+              const omitted = expectedOverlays(paragraphs, paper.translations).filter(p => !painted.has(p.id));
+              if (omitted.length) throw new Error(`第 ${number} 页的段落 ${omitted.map(p => p.id).join('、')} 未能完整排版，已停止导出。可先在对照模式查看完整译文。`);
               output = translated;
             }
             if (mode === 'bilingual') {
@@ -253,6 +257,7 @@ window.__ModuleLoader__.load({
       const [renderer, setRenderer] = useState(null);
       const [rendered, setRendered] = useState(null);
       const [error, setError] = useState('');
+      const [layoutError, setLayoutError] = useState('');
       useEffect(() => {
         const abort = new AbortController();
         let handle;
@@ -311,11 +316,17 @@ window.__ModuleLoader__.load({
       const paragraphs = paper.paragraphs.filter(p => p.page === number);
       const regions = (paper.regions ?? []).filter(region => region.page === number);
       const ready = rendered?.number === number;
+      const bodySize = renderer?.documentBodySize(paper.paragraphs);
+      // Polling progress or call counts does not change page pixels.
+      const pageContent = JSON.stringify([dimensions, paragraphs, regions, paragraphs.map(p => paper.translations[p.id]), bodySize]);
       useLayoutEffect(() => {
         if (ready && renderer && dimensions) {
-          renderer.paintTranslation(translated.current, original.current, dimensions, paragraphs, paper.translations, regions);
+          const lines = renderer.paintTranslation(translated.current, original.current, dimensions, paragraphs, paper.translations, regions, bodySize);
+          const painted = new Set(lines.map(line => line.paragraphId));
+          const omitted = renderer.expectedOverlays(paragraphs, paper.translations).filter(p => !painted.has(p.id));
+          setLayoutError(omitted.length ? `段落 ${omitted.map(p => p.id).join('、')} 暂无法在原位置完整排版，请切换对照模式查看完整译文。` : '');
         }
-      }, [rendered, renderer, number, paper]);
+      }, [rendered, renderer, number, pageContent]);
       if (!dimensions) return null;
       const sheetStyle = { aspectRatio: `${dimensions.width} / ${dimensions.height}` };
       const paragraphButton = p => h('button', {
@@ -325,6 +336,7 @@ window.__ModuleLoader__.load({
       });
       return h(React.Fragment, null,
         error && h('p', { className: 'qr-error', role: 'alert' }, error),
+        layoutError && h('p', { className: 'qr-error', role: 'alert' }, layoutError),
         h('div', { className: 'qr-viewport' },
           h('div', { className: 'qr-spread', style: { width: `${zoom}%` } },
             h('section', null, h('h3', null, '英文原文'),
@@ -583,6 +595,17 @@ window.__ModuleLoader__.load({
           } catch (e) { if (active.current === id) setError(e.message); }
         }
 
+        async function pauseTranslation() {
+          setError('');
+          try {
+            const updated = await request('pause', { id }, {});
+            if (active.current === id) {
+              setPaper(updated);
+              setRevision(value => value + 1);
+            }
+          } catch (e) { if (active.current === id) setError(e.message); }
+        }
+
         async function clearTranslations() {
           if (!paper || busy) return;
           if (!window.confirm('确定清除这篇文献的全部译文与问答记录吗？原文和工作区会保留。')) return;
@@ -667,9 +690,12 @@ window.__ModuleLoader__.load({
         const firstPage = paper?.range?.first ?? 1;
         const lastPage = paper?.range?.last ?? paper?.pages.length ?? 1;
         const layoutPages = new Set(paper?.layoutPages);
-        const needsLayout = paper && (paper.layoutVersion !== 2 ||
+        const needsLayout = paper && (paper.layoutVersion !== 3 ||
           Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i).some(page => !layoutPages.has(page)));
         const activeParagraphs = new Set(paper?.paragraphs.map(p => p.id));
+        const untranslated = (paper?.paragraphs ?? []).filter(p =>
+          [undefined, 'text', 'heading', 'caption'].includes(p.kind) && !paper.translations[p.id]?.trim());
+        const untranslatedPages = [...new Set(untranslated.map(p => p.page))];
         useEffect(() => {
           if (!paper) return;
           const first = paper.range?.first ?? 1;
@@ -753,12 +779,27 @@ window.__ModuleLoader__.load({
                       onChange: e => void chooseModel({ reasoningEffort: e.target.value }),
                     },
                     h('option', { value: '' }, effortsLoading ? '读取中…' : efforts.length ? '默认' : '不支持'),
-                    ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name))))),
+                    ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name)))),
+                  h('label', null, '翻译方式 ',
+                    h('select', {
+                      value: models.current?.translationMode ?? 'economy', 'aria-label': '翻译方式',
+                      title: '省费翻译在模型支持时关闭深度思考；论文问答仍使用上方的推理设置。下次开始翻译时生效。',
+                      onChange: e => void chooseModel({ translationMode: e.target.value }),
+                    }, h('option', { value: 'economy' }, '快速省费'),
+                    h('option', { value: 'custom' }, '使用所选推理强度')))),
+                models.current?.translationMode !== 'custom' && h('p', { className: 'qr-hint' },
+                  '快速省费会在模型支持时关闭翻译的深度思考；论文问答仍使用上方的推理设置。'),
                 h('div', { className: 'qr-actions', role: 'status' },
                   h('span', null, `全文翻译 ${paper.translated} / ${paper.expected ?? paper.paragraphs.length} 段`),
+                  paper.translationStats?.requests > 0 && h('span', { className: 'qr-hint' },
+                    `本次模型调用 ${paper.translationStats.requests} 次，其中补译 ${paper.translationStats.repairs} 次`),
                   h('progress', { value: paper.translated, max: paper.expected ?? paper.paragraphs.length, 'aria-label': '全文翻译进度' }),
                   paper.status !== 'running' && paper.status !== 'complete' &&
                     h('button', { type: 'button', onClick: retry, disabled: !!busy }, '继续全文翻译'),
+                  paper.status === 'running' && h('button', {
+                    type: 'button', onClick: pauseTranslation, disabled: !!busy,
+                    title: '停止后续模型请求，保留已完成的译文。',
+                  }, '暂停翻译'),
                   needsLayout && h('button', {
                     type: 'button', onClick: refreshLayout, disabled: !!busy || paper.status === 'running',
                   }, '重新识别版面'),
@@ -777,6 +818,9 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'qr-hint' }, `范围：第 ${firstPage}–${lastPage} 页。`),
                 exportMode !== 'original' && paper.translated < paper.expected &&
                   h('p', { className: 'qr-hint' }, `译文进度 ${paper.translated} / ${paper.expected} 段。未译段落随原文保留。`),
+                exportMode !== 'original' && untranslated.length > 0 && h('p', { className: 'qr-error' },
+                  `第 ${untranslatedPages.join('、')} 页还有 ${untranslated.length} 段未完成翻译，当前导出会保留这些段落的原文。`,
+                  paper.status !== 'running' && h('button', { type: 'button', onClick: retry, disabled: !!busy }, '补齐缺失译文')),
                 h('div', { className: 'qr-actions' },
                   h('button', {
                     type: 'button', className: 'qr-primary',

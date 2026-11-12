@@ -17,7 +17,7 @@ const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
 const ID = /^[a-f0-9]{64}$/;
 const require = createRequire(import.meta.url);
-const LAYOUT_VERSION = 2;
+const LAYOUT_VERSION = 3;
 
 function validBox(box) {
   return Array.isArray(box) && box.length === 4
@@ -142,7 +142,7 @@ function validateDocument(input) {
 
 // Older manifests are classified when read and saved in the current schema
 // on reimport. Reads never replace the manifest of a concurrent import.
-const SCHEMA = 4;
+const SCHEMA = 5;
 
 function withKinds(document) {
   const needs = document.schema !== SCHEMA || document.paragraphs.some(paragraph => paragraph.kind === undefined);
@@ -411,8 +411,9 @@ export function createReader(ctx, root) {
     const job = jobs.get(id);
     return {
       ...document, translations: activeTranslations, history, translated: translatedCount, expected: translatable.length,
-      status: translatable.length === translatedCount ? 'complete' : job?.status ?? 'pending',
+      status: translatable.length === translatedCount ? 'complete' : job?.status === 'complete' ? 'pending' : job?.status ?? 'pending',
       error: job?.error ?? '', failedParagraphs: job?.failures ?? [],
+      translationStats: job?.stats,
     };
   }
 
@@ -423,7 +424,7 @@ export function createReader(ctx, root) {
     if (jobs.get(id)?.status === 'running') return;
     const controller = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, controller.signal]);
-    const job = { status: 'running', error: '', controller };
+    const job = { status: 'running', error: '', controller, stats: { requests: 0, repairs: 0, inputChars: 0, outputChars: 0 } };
     jobs.set(id, job);
     job.task = (async () => {
       try {
@@ -434,9 +435,19 @@ export function createReader(ctx, root) {
         const droppedSuspicious = pruneSuspicious(document, translations);
         if (droppedEmpty || droppedSuspicious) await saveJson(path, translations);
         if (!document.paragraphs.some(p => isTranslatable(p.kind) && !Object.hasOwn(translations, p.id))) return;
-        const route = await waitForTask(routeFor(ctx.llm, await readSettings(), signal), signal);
-        const request = async (system, data, maxTokens) => {
-          const run = () => modelTask(() => complete(ctx.llm, route, system, data, maxTokens, signal), signal);
+        let routeTask;
+        const request = async (system, data, maxTokens, { phase = 'initial' } = {}) => {
+          const run = () => modelTask(async () => {
+            routeTask ??= readSettings().then(settings => routeFor(ctx.llm, settings, signal, { translation: true }));
+            const route = await waitForTask(routeTask, signal);
+            signal.throwIfAborted();
+            job.stats.requests++;
+            if (phase !== 'initial') job.stats.repairs++;
+            job.stats.inputChars += system.length + JSON.stringify(data).length;
+            const reply = await complete(ctx.llm, route, system, data, maxTokens, signal);
+            job.stats.outputChars += reply.text.length;
+            return reply;
+          }, signal);
           try { return await run(); }
           catch (error) {
             if (error?.code !== 'RATE_LIMIT') throw error;
@@ -460,7 +471,13 @@ export function createReader(ctx, root) {
         job.status = 'error';
         job.error = error instanceof ReaderError ? error.message : '全文翻译暂停。请检查账号或本地文件后继续。';
       } finally {
-        if (jobs.get(id) === job && (job.status === 'running' || signal.aborted)) jobs.delete(id);
+        if (jobs.get(id) === job) {
+          if (signal.aborted) {
+            if (lifetime.signal.aborted) jobs.delete(id);
+            else { job.status = 'pending'; job.error = ''; }
+          }
+          else if (job.status === 'running') job.status = 'complete';
+        }
       }
     })();
   }
@@ -472,6 +489,18 @@ export function createReader(ctx, root) {
       starting.set(id, task);
     }
     return starting.get(id);
+  }
+
+  async function pauseTranslation(id) {
+    assertIdle(id);
+    await paper(id);
+    await starting.get(id);
+    const job = jobs.get(id);
+    if (job?.status === 'running') {
+      job.controller.abort(new ReaderError('翻译已暂停，已完成的译文已保留。', 409));
+      await job.task;
+    }
+    return detail(id);
   }
 
   async function importPaper(request) {
@@ -636,7 +665,8 @@ export function createReader(ctx, root) {
           const provider = providers.find(item => item.id === input?.provider) ?? providers[0];
           if (!provider) throw new ReaderError('当前没有可用的文本模型。', 503);
           const model = provider.models.find(item => item.id === input?.model) ?? provider.models[0];
-          const settings = { provider: provider.id, model: model.id };
+          const settings = { provider: provider.id, model: model.id,
+            translationMode: input?.translationMode === 'custom' ? 'custom' : 'economy' };
           let efforts = [];
           try {
             const info = await ctx.llm.resolveModelInfo?.(provider.id, model.id);
@@ -652,6 +682,7 @@ export function createReader(ctx, root) {
           await prepareTranslation(id);
           return json(await detail(id), 202);
         }
+        if (action === 'pause') return json(await pauseTranslation(id));
         if (action === 'reset') {
           return json(await mutatePaper(id, async document => {
             await rm(join(directory(id), 'translations.json'), { force: true });
