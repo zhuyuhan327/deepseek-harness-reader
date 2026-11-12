@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -54,28 +54,34 @@ function model() {
 }
 
 async function harness(t) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-test-'));
+  const temp = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-test-'));
+  const root = join(temp, 'library');
+  const config = join(temp, 'profile', 'papers');
+  await mkdir(root);
   const workspaceIds = new Map();
+  let workspaceId;
   const fake = model();
   const ctx = {
     llm: fake.llm,
     workspaceRegistry: {
-      async create(path) {
-        if (!workspaceIds.has(path)) workspaceIds.set(path, `workspace-${workspaceIds.size + 1}`);
-        return { id: workspaceIds.get(path) };
+      async create(path, title) {
+        if (!workspaceIds.has(path)) workspaceIds.set(path, { id: `workspace-${workspaceIds.size + 1}`, path, title });
+        return workspaceIds.get(path);
       },
+      list: () => [...workspaceIds.values()],
     },
   };
-  let reader = createReader(ctx, root);
+  let reader = createReader(ctx, config);
   t.after(async () => {
     reader.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(temp, { recursive: true, force: true });
   });
 
   async function request(action, id, body, extra = {}) {
     const url = new URL('/api/dsh-quiet-reader', origin);
     url.searchParams.set('action', action);
     if (id) url.searchParams.set('id', id);
+    if (workspaceId) url.searchParams.set('workspaceId', workspaceId);
     const headers = { 'x-quiet-reader': '1', ...extra };
     const response = await reader.fetch(new Request(url, {
       method: body === undefined ? 'GET' : 'POST',
@@ -113,11 +119,19 @@ async function harness(t) {
     assert.fail(`文献未达到状态 ${status}`);
   }
 
+  const selection = await request('workspace', null, { folder: root });
+  assert.equal(selection.status, 200);
+  workspaceId = selection.value.workspace.id;
+  async function paperPath(id) {
+    const name = (await readdir(root)).find(entry => entry.endsWith(`-${id}`));
+    assert.ok(name);
+    return join(root, name);
+  }
   return {
-    ...fake, request, upload, until, workspaceIds, root,
+    ...fake, request, upload, until, workspaceIds, paperPath,
     restart() {
       reader.dispose();
-      reader = createReader(ctx, root);
+      reader = createReader(ctx, config);
     },
   };
 }
@@ -149,7 +163,8 @@ test('重复导入复用工作区，论文问答只读取当前文献', async t 
   assert.equal(duplicate.workspaceId, first.workspaceId);
   const second = await host.upload('Article beta');
   await host.until(second.id, 'complete');
-  assert.equal(host.workspaceIds.size, 2);
+  assert.equal(host.workspaceIds.size, 1);
+  assert.equal(first.workspaceId, second.workspaceId);
 
   const answer = await host.request('ask', second.id, {
     question: '方法是什么？', page: 1, selectedId: 3,
@@ -173,6 +188,7 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
       layoutVersion,
       pages: Array.from({ length: 2 }, () => ({ width: 612, height: 792 })),
       range: { first, last: first },
+      regions: [{ page: first, kind: 'formula', box: [.20, .4, .5, .45] }],
       paragraphs: [{
         id: 1, page: first, box: [.1, .2, .9, .25], lines: [[.1, .2, .8, .24]],
         text: first === 1 ? 'The first section describes experimental methods.' : 'The next section presents research findings.',
@@ -184,11 +200,12 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   };
   const first = await upload(1);
   const saved = await host.until(first.id, 'complete');
-  const reanalyzed = await upload(1, 11);
+  const reanalyzed = await upload(1, 12);
   assert.deepEqual(reanalyzed.layoutPages, [1]);
   assert.deepEqual(reanalyzed.translations, saved.translations);
+  assert.deepEqual(reanalyzed.regions.map(region => region.kind), ['formula']);
 
-  const second = await upload(2, 11);
+  const second = await upload(2, 12);
   assert.equal(second.id, first.id);
   assert.equal(second.workspaceId, first.workspaceId);
   assert.deepEqual(second.range, { first: 2, last: 2 });
@@ -197,7 +214,7 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   await host.request('translate', second.id, {});
   assert.equal((await host.until(second.id, 'complete')).translated, 1);
 
-  const reopened = await upload(1, 11);
+  const reopened = await upload(1, 12);
   assert.deepEqual(reopened.translations, saved.translations);
   assert.equal(host.calls.length, 2);
 });
@@ -293,7 +310,7 @@ test('含替换字符的旧译文会被丢弃并在继续时重新翻译', async
   const host = await harness(t);
   const paper = await host.upload('Corrupted answer', 3);
   await host.until(paper.id, 'complete');
-  const path = join(host.root, paper.id, 'translations.json');
+  const path = join(await host.paperPath(paper.id), 'translations.json');
   const translations = JSON.parse(await readFile(path, 'utf8'));
   translations[2] = '第 2 段\uFFFD的译文';
   await writeFile(path, JSON.stringify(translations));
@@ -422,7 +439,7 @@ test('疑似截断的旧译文会被作废并重译', async t => {
     'Another long English sentence about the experiments, the datasets and the measured results of this paper.',
   ]);
   await host.until(paper.id, 'complete');
-  const path = join(host.root, paper.id, 'translations.json');
+  const path = join(await host.paperPath(paper.id), 'translations.json');
   const data = JSON.parse(await readFile(path, 'utf8'));
   data[1] = '= 1 e− 4}。';
   await writeFile(path, JSON.stringify(data));

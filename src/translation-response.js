@@ -130,19 +130,24 @@ function jsonCandidates(text) {
 function parseJson(text) {
   for (const candidate of jsonCandidates(text)) {
     try {
-      return JSON.parse(candidate);
+      return { value: JSON.parse(candidate), source: candidate };
     } catch {}
+    const repaired = sanitizeJson(candidate);
     try {
-      return JSON.parse(sanitizeJson(candidate));
+      return { value: JSON.parse(repaired), source: repaired };
     } catch {}
   }
   return undefined;
 }
 
+const WRAPPERS = ['translations', 'result', 'data', 'paragraphs', 'output'];
+const ID_FIELDS = ['id', 'index', 'number', 'paragraph', 'key'];
+const VALUE_FIELDS = ['translation', 'text', 'zh', 'chinese', 'content', 'value'];
+
 function valueText(value) {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const key of ['translation', 'text', 'zh', 'chinese', 'content', 'value']) {
+    for (const key of VALUE_FIELDS) {
       if (typeof value[key] === 'string') return value[key];
     }
   }
@@ -151,21 +156,55 @@ function valueText(value) {
 
 function unwrapPayload(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  for (const key of ['translations', 'result', 'data', 'paragraphs', 'output']) {
+  for (const key of WRAPPERS) {
     if (value[key] && typeof value[key] === 'object') return value[key];
   }
   return value;
 }
 
+function paragraphId(key) {
+  if (typeof key === 'number') return Number.isSafeInteger(key) && key > 0 ? key : undefined;
+  const match = /^(?:(?:段落|paragraph|id|p)\s*[:#：]?\s*)?(\d+)$/i.exec(String(key ?? '').trim());
+  const id = Number(match?.[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
+function addTranslation(values, key, value) {
+  const id = paragraphId(key);
+  if (id !== undefined) values.set(id, values.has(id) ? '' : value);
+}
+
+// JSON.parse keeps the last duplicate field. Detect duplicate keys in each
+// object before accepting an otherwise syntactically valid response.
+function duplicateFields(source) {
+  const duplicates = new Set();
+  const stack = [];
+  for (const match of source.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/gs)) {
+    const token = match[0];
+    if (token === '{') stack.push(new Set());
+    else if (token === '[') stack.push(null);
+    else if (token === '}' || token === ']') stack.pop();
+    else {
+      const object = stack.at(-1);
+      if (!object) continue;
+      let next = match.index + token.length;
+      while (/\s/.test(source.charAt(next))) next++;
+      if (source[next] !== ':') continue;
+      const key = JSON.parse(token);
+      if (object.has(key)) duplicates.add(key);
+      object.add(key);
+    }
+  }
+  return duplicates;
+}
+
 function collectTranslations(parsed, batch) {
   const values = new Map();
-  const accept = (key, value) => {
-    let id = typeof key === 'number' ? key : Number(String(key ?? '').trim());
-    if (!Number.isInteger(id)) {
-      const digits = String(key ?? '').match(/\d{1,6}/);
-      id = digits ? Number(digits[0]) : NaN;
-    }
-    if (Number.isInteger(id) && id > 0 && !values.has(id)) values.set(id, valueText(value));
+  const accept = (key, value) => addTranslation(values, key, valueText(value));
+  const addRecord = item => {
+    const ids = new Set(ID_FIELDS.map(field => paragraphId(item[field])).filter(id => id !== undefined));
+    if (ids.size === 1) accept(ids.values().next().value, item);
+    else for (const id of ids) values.set(id, '');
   };
   const addList = list => {
     if (list.every(item => typeof item === 'string')) {
@@ -174,13 +213,14 @@ function collectTranslations(parsed, batch) {
     }
     for (const item of list) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-      accept(item.id ?? item.index ?? item.number ?? item.paragraph ?? item.key, item);
+      addRecord(item);
     }
   };
   const root = unwrapPayload(parsed);
   if (Array.isArray(root)) addList(root);
   else if (root && typeof root === 'object') {
-    for (const [key, value] of Object.entries(root)) accept(key, value);
+    if (ID_FIELDS.some(field => Object.hasOwn(root, field)) && valueText(root)) addRecord(root);
+    else for (const [key, value] of Object.entries(root)) accept(key, value);
   }
   return values;
 }
@@ -206,16 +246,29 @@ function alignTranslations(entries, batch, complete) {
 // Salvage complete pairs from a truncated object: {"12":"全文","13":"未完
 function salvagePairs(text) {
   const values = new Map();
-  const pair = /"(\d{1,6})"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  for (const match of text.matchAll(pair)) {
-    const id = Number(match[1]);
-    let value;
-    try {
-      value = JSON.parse('"' + match[2] + '"');
-    } catch {
-      continue;
+  let source = sanitizeJson(text);
+  const wrapper = /^\{\s*"([a-z]+)"\s*:\s*(?=\{)/i.exec(source);
+  if (wrapper && WRAPPERS.includes(wrapper[1])) source = source.slice(wrapper[0].length);
+  if (!source.startsWith('{')) return values;
+  const key = /\s*"([^"\\]+)"\s*:\s*/y;
+  const quoted = /"(?:[^"\\]|\\.)*"\s*/ys;
+  let cursor = 1;
+  while (cursor < source.length) {
+    key.lastIndex = cursor;
+    const field = key.exec(source);
+    if (!field || paragraphId(field[1]) === undefined) break;
+    quoted.lastIndex = key.lastIndex;
+    const value = quoted.exec(source);
+    const delimiter = value && source[quoted.lastIndex];
+    if (!value || (delimiter !== undefined && delimiter !== ',' && delimiter !== '}')) {
+      // Retain the unfinished key to disambiguate positional numbering.
+      addTranslation(values, field[1], '');
+      break;
     }
-    if (id > 0 && typeof value === 'string' && value.trim() && !values.has(id)) values.set(id, value);
+    try { addTranslation(values, field[1], JSON.parse(value[0])); }
+    catch { addTranslation(values, field[1], ''); }
+    if (delimiter !== ',') break;
+    cursor = quoted.lastIndex + 1;
   }
   return values;
 }
@@ -223,14 +276,13 @@ function salvagePairs(text) {
 // Last resort for models that answer with a numbered list instead of JSON.
 function lineTranslations(text, finished) {
   const values = new Map();
-  const lines = [...text.matchAll(/^[ \t]*(\d{1,6})[ \t]*[.、:：)][ \t]*/gm)];
+  const lines = [...text.matchAll(/^[ \t]*(\d+)[ \t]*(?:\.(?!\d)|[、:：)])[ \t]*/gm)];
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    const id = Number(line[1]);
     const next = lines[index + 1];
     // The final item lacks an end delimiter. Keep its ID for alignment checks.
     const translation = finished || next ? text.slice(line.index + line[0].length, next?.index).trim() : '';
-    if (id > 0 && !values.has(id)) values.set(id, translation);
+    addTranslation(values, line[1], translation);
   }
   return values;
 }
@@ -244,16 +296,24 @@ function lineTranslations(text, finished) {
  */
 export function parseTranslations(output, batch, { allowPlainText = false, finished = true } = {}) {
   const text = String(output ?? '').replace(/\r\n?/g, '\n');
-  const parsed = parseJson(text);
+  const json = parseJson(text);
+  const parsed = json?.value;
+  const duplicates = json ? duplicateFields(json.source) : new Set();
+  const ambiguous = [...WRAPPERS, ...ID_FIELDS, ...VALUE_FIELDS].some(key => duplicates.has(key));
   let entries;
-  if (parsed === undefined) {
+  if (ambiguous) entries = new Map();
+  else if (!json) {
     entries = salvagePairs(firstJsonSpan(text));
     if (!entries.size) entries = lineTranslations(text, finished);
   } else {
     entries = collectTranslations(parsed, batch);
+    for (const key of duplicates) {
+      const id = paragraphId(key);
+      if (entries.has(id)) entries.set(id, '');
+    }
   }
-  const values = alignTranslations(entries, batch, parsed !== undefined);
-  if (finished && allowPlainText && batch.length === 1 && !values.size && !entries.size) {
+  const values = alignTranslations(entries, batch, Boolean(json));
+  if (!duplicates.size && finished && allowPlainText && batch.length === 1 && !values.size && !entries.size) {
     let candidate = '';
     if (typeof parsed === 'string') candidate = parsed;
     else if (parsed && !Array.isArray(parsed) && Object.keys(parsed).length === 1) candidate = valueText(parsed);

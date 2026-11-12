@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  assembleFragments, complete, looksComplete, parseTranslations, protectMath,
+  assembleFragments, complete, looksComplete, parseTranslations, protectMath, routeFor, selectEvidence,
   translationFragments, validateTranslation,
 } from '../src/model.js';
 
@@ -47,6 +47,18 @@ test('已经回填的公式可按译文语序重排，每个原始公式必须�
   }
   assert.deepEqual(validateTranslation({ id: 8, text: 'The equation x = 1 describes the result.' }, '方程 x = 1.5 描述结果。'), { reason: 'math' });
   assert.equal(validateTranslation({ id: 8, text: 'The network fθ estimates σi.' }, '网络 fθ 估计 σi。').text, '网络 fθ 估计 σi。');
+});
+
+test('原文中的等价占位符拼写保留字面值，公式延伸为新符号时拒绝保存', () => {
+  const paragraph = { id: 1, text: 'Use 【Ｍ：１：０】 and [MM:1:0] with x = σ and y = 1.' };
+  const protectedText = protectMath(paragraph.text, [], paragraph.id);
+  assert.deepEqual(protectedText.tokens.map(token => token.value), ['【Ｍ：１：０】', '[MM:1:0]', 'x = σ', 'y = 1']);
+  assert.ok(protectedText.tokens.every(token => token.marker.startsWith('⟦MMM:')));
+  assert.equal(validateTranslation(paragraph, protectedText.text, protectedText.tokens).text, paragraph.text);
+  for (const changed of ['x = σ²', 'y = 1e-5']) {
+    const source = paragraph.text.replace(changed.startsWith('x') ? 'x = σ' : 'y = 1', changed);
+    assert.deepEqual(validateTranslation(paragraph, source), { reason: 'math' });
+  }
 });
 
 test('拆开的 PDF 数学文本按完整公式复原，缩写中的字母不变成变量', () => {
@@ -99,6 +111,26 @@ test('截断时保留已闭合的 JSON 值和前面的编号项，丢弃未结�
     assert.deepEqual(parseTranslations(output, batch.slice(0, 1), options).missing, [12]);
   }
   assert.deepEqual(parseTranslations('2. 可能是第二项。\n1. 未完', [{ id: 2 }, { id: 5 }], options).missing, [2, 5]);
+  assert.deepEqual(parseTranslations('{"2":"可能是第二项。","1":"未完', [{ id: 2 }, { id: 5 }], options).missing, [2, 5]);
+  assert.deepEqual([...parseTranslations('{"translations":{"12":"完整句子。","15":"未完', batch, options).values], [[12, '完整句子。']]);
+  assert.deepEqual(parseTranslations('{"metadata":{"12":"注释并非译文。"},"15":"未完', batch, options).missing, [12, 15]);
+});
+
+test('重复或无法明确映射的段落编号不会覆盖译文', () => {
+  const batch = [{ id: 2 }, { id: 5 }];
+  for (const output of [
+    '{"2":"第一份","2":"第二份","5":"正确的译文"}',
+    '{"translations":{"段落2":"第一份","2":"第二份","5":"正确的译文"}}',
+    '[{"id":2,"text":"第一份"},{"id":2,"text":"第二份"},{"id":5,"text":"正确的译文"}]',
+    '[{"id":2,"index":1,"text":"编号冲突"},{"id":5,"text":"正确的译文"}]',
+    '2. 第一份\n2. 第二份\n5. 正确的译文',
+    '{"第 7 页第 2 段":"页码和段落编号并存","5":"正确的译文"}',
+  ]) {
+    const { values, missing } = parseTranslations(output, batch);
+    assert.deepEqual([...values], [[5, '正确的译文']]);
+    assert.deepEqual(missing, [2]);
+  }
+  assert.equal(parseTranslations('{"id":5,"translation":"正确的译文"}', [{ id: 5 }]).values.get(5), '正确的译文');
 });
 
 test('已取消的模型请求不会启动流', async () => {
@@ -107,6 +139,46 @@ test('已取消的模型请求不会启动流', async () => {
   controller.abort(reason);
   const llm = { stream() { assert.fail('模型不应收到已取消的请求'); } };
   await assert.rejects(complete(llm, {}, '', {}, 10, controller.signal), reason);
+});
+
+test('模型迭代器的读取和关闭均不响应信号时仍可取消请求', { timeout: 1_000 }, async () => {
+  const controller = new AbortController();
+  const started = Promise.withResolvers();
+  const closed = Promise.withResolvers();
+  const pending = new Promise(() => {});
+  const llm = { stream: () => ({
+    [Symbol.asyncIterator]() { return this; },
+    next() { started.resolve(); return pending; },
+    return() { closed.resolve(); return pending; },
+  }) };
+  const request = complete(llm, {}, '', {}, 10, controller.signal);
+  await started.promise;
+  controller.abort();
+  await assert.rejects(request, { code: 'ABORTED' });
+  await closed.promise;
+});
+
+test('所选模型的列表或推理设置暂不可读时不会悄悄切换提供方', async () => {
+  for (const unavailable of ['list', 'info']) {
+    const providers = [];
+    const llm = {
+      listProviders: () => [{ id: 'chosen' }, { id: 'deepseek-account' }],
+      async listModels(provider) {
+        providers.push(provider);
+        if (unavailable === 'list') throw new Error('temporarily unavailable');
+        return [{ id: 'model', inputModalities: ['text'] }];
+      },
+      async resolveModelInfo() { throw new Error('temporarily unavailable'); },
+    };
+    await assert.rejects(routeFor(llm, { provider: 'chosen', model: 'model' }), { code: 'MODEL_INFO' });
+    assert.deepEqual(providers, ['chosen']);
+  }
+});
+
+test('超过证据剩余容量的长段落不阻塞后续短段落', () => {
+  const paragraphs = Array.from({ length: 5 }, (_, index) => ({ id: index + 1, page: 1, text: 'x'.repeat(2400) }));
+  paragraphs.push({ id: 6, page: 2, text: 'Short evidence.' });
+  assert.deepEqual(selectEvidence({ paragraphs }, {}, 'method', 1).map(excerpt => excerpt.id), [1, 2, 3, 4, 6]);
 });
 
 test('模型限流和额度耗尽保留不同错误代码', async () => {

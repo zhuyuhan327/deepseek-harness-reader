@@ -7,17 +7,25 @@ import { test } from 'node:test';
 import { createReader } from '../src/host.js';
 
 test('按页升级旧版面时保留相同段落和译文，旧客户端也不回退已升级的页', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-layout-upgrade-'));
+  const temp = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-layout-upgrade-'));
+  const root = join(temp, 'library');
+  await mkdir(root);
+  const origin = 'http://127.0.0.1:8767/api/dsh-quiet-reader';
+  const currentLayoutVersion = 12;
   const pdf = Buffer.from('%PDF-1.7\nLayout upgrade fixture\n%%EOF');
   const id = createHash('sha256').update(pdf).digest('hex');
   const path = join(root, id);
+  let workspace;
   const reader = createReader({
-    workspaceRegistry: { async create() { return { id: 'fixture-workspace' }; } },
+    workspaceRegistry: {
+      async create(path, title) { return workspace = { id: 'fixture-workspace', path, title }; },
+      list: () => workspace ? [workspace] : [],
+    },
     get llm() { assert.fail('Reopening a paper must not request a translation'); },
-  }, root);
+  }, join(temp, 'profile', 'papers'));
   t.after(async () => {
     reader.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(temp, { recursive: true, force: true });
   });
 
   const pages = Array.from({ length: 3 }, () => ({ width: 612, height: 792 }));
@@ -36,6 +44,11 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
     range: { first: 1, last: 2 }, pages,
     paragraphs: [paragraph(1, 1, first), paragraph(2, 2, previousSecond)],
   }));
+  const selected = await reader.fetch(new Request(`${origin}?action=workspace`, {
+    method: 'POST', headers: { 'x-quiet-reader': '1' }, body: JSON.stringify({ folder: root }),
+  }));
+  assert.equal(selected.status, 200);
+  const workspaceId = (await selected.json()).workspace.id;
 
   async function upload(layoutVersion, source) {
     const form = new FormData();
@@ -45,7 +58,10 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
       range: { first: source.page, last: source.page },
       paragraphs: [{ ...source, id: 1 }],
     }));
-    const response = await reader.fetch(new Request('http://127.0.0.1:8767/api/dsh-quiet-reader?action=import', {
+    const url = new URL(origin);
+    url.searchParams.set('action', 'import');
+    url.searchParams.set('workspaceId', workspaceId);
+    const response = await reader.fetch(new Request(url, {
       method: 'POST', headers: { 'x-quiet-reader': '1' }, body: form,
     }));
     const result = await response.json();
@@ -54,8 +70,8 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   }
 
   const newBox = [.14, .21, .86, .26];
-  const upgradedFirst = await upload(11, paragraph(1, 1, first, newBox));
-  assert.equal(upgradedFirst.layoutVersion, 11);
+  const upgradedFirst = await upload(currentLayoutVersion, paragraph(1, 1, first, newBox));
+  assert.equal(upgradedFirst.layoutVersion, currentLayoutVersion);
   assert.deepEqual(upgradedFirst.layoutPages, [1]);
   assert.deepEqual(upgradedFirst.translations, { 1: translations[1] });
   assert.deepEqual(upgradedFirst.paragraphs[0].box, newBox);
@@ -63,12 +79,12 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   assert.equal(partial.paragraphs.find(p => p.id === 2).text, previousSecond);
 
   const legacyThird = await upload(2, paragraph(1, 3, 'The third page is newly imported from the old client.'));
-  assert.equal(legacyThird.layoutVersion, 11);
+  assert.equal(legacyThird.layoutVersion, currentLayoutVersion);
   assert.deepEqual(legacyThird.layoutPages, [1]);
   assert.deepEqual(legacyThird.paragraphs.map(p => p.id), [3]);
 
-  const upgradedSecond = await upload(11, paragraph(1, 2, revisedSecond));
-  assert.equal(upgradedSecond.layoutVersion, 11);
+  const upgradedSecond = await upload(currentLayoutVersion, paragraph(1, 2, revisedSecond));
+  assert.equal(upgradedSecond.layoutVersion, currentLayoutVersion);
   assert.deepEqual(upgradedSecond.layoutPages, [1, 2]);
   assert.deepEqual(upgradedSecond.paragraphs.map(p => [p.id, p.text]), [[4, revisedSecond]]);
   assert.deepEqual(upgradedSecond.translations, {});

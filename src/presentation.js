@@ -14,6 +14,12 @@ function area([l, t, r, b]) {
   return (r - l) * (b - t);
 }
 
+function validBox(box) {
+  return Array.isArray(box) && box.length === 4 && box.every(Number.isFinite)
+    && box[0] >= 0 && box[1] >= 0 && box[2] <= 1 && box[3] <= 1
+    && box[0] < box[2] && box[1] < box[3];
+}
+
 function overlap([al, at, ar, ab], [bl, bt, br, bb]) {
   return Math.max(0, Math.min(ar, br) - Math.max(al, bl))
     * Math.max(0, Math.min(ab, bb) - Math.max(at, bt));
@@ -26,7 +32,8 @@ export function documentBodySize(paragraphs) {
 }
 
 function sourceBoxes(paragraph) {
-  return paragraph.lines?.length ? paragraph.lines : [paragraph.box];
+  const lines = Array.isArray(paragraph.lines) ? paragraph.lines.filter(validBox) : [];
+  return lines.length ? lines : validBox(paragraph.box) ? [paragraph.box] : [];
 }
 
 function covered(boxes, obstacles) {
@@ -37,9 +44,11 @@ function covered(boxes, obstacles) {
 export function expectedOverlays(paragraphs, translations) {
   const candidates = paragraphs.filter(p => isTranslatable(p.kind) && translations[p.id]?.trim());
   return candidates.filter(p => {
+    // Keep malformed candidates in the expected set so export reports them.
+    if (!validBox(p.box)) return true;
     const size = area(p.box);
     const boxes = sourceBoxes(p);
-    return !candidates.some(q => q !== p && q.text === p.text && overlap(p.box, q.box) > size * .5
+    return !candidates.some(q => q !== p && validBox(q.box) && q.text === p.text && overlap(p.box, q.box) > size * .5
       && (area(q.box) > size || (area(q.box) === size && q.id < p.id)) && covered(boxes, sourceBoxes(q)));
   });
 }
@@ -48,16 +57,16 @@ export function pageOverlays(paragraphs, translations, regions) {
   // Only figure and table regions hide a translation here. Formula blocks are
   // avoided during placement, so a text line that overlaps an equation still
   // gets its translation instead of disappearing from the exported PDF.
-  const regionBoxes = regions.filter(region => region.kind !== 'formula').map(region => region.box);
+  const regionBoxes = regions.filter(region => region.kind !== 'formula' && validBox(region.box)).map(region => region.box);
   return expectedOverlays(paragraphs, translations)
-    .filter(p => !covered(sourceBoxes(p), regionBoxes));
+    .filter(p => validBox(p.box) && !covered(sourceBoxes(p), regionBoxes));
 }
 
 function protectedAreas(paragraphs, regions, translations) {
   return [
     ...regions.map(region => region.box),
     ...paragraphs.filter(p => !isTranslatable(p.kind) || !translations[p.id]?.trim()).map(p => p.box),
-  ];
+  ].filter(validBox);
 }
 
 function availableBoxes(source, obstacles) {
@@ -229,29 +238,6 @@ function fit(ctx, units, paragraph, width, height, bodySize) {
   return { ...best, x, y, align };
 }
 
-// Last-resort layout: the translation must not disappear just because the
-// source block is narrow. Wrap at a small fixed size, ignore overflow, and let
-// the caller clip the paint to the block so neighbours stay untouched.
-function fallbackFit(ctx, units, paragraph, width, height, bodySize) {
-  const style = paragraph.style ?? {};
-  const heading = paragraph.kind === 'heading';
-  const size = Math.min(bodySize, 5.5);
-  const family = style.fontFamily === 'monospace' ? MONO : SANS;
-  const font = `${heading ? '700' : '400'} ${size}px ${family}`;
-  const mathFont = `400 ${size}px ${MATH}`;
-  const lines = wrap(ctx, units, Math.max(width, 1), size, font, mathFont);
-  if (!lines.length) return null;
-  ctx.font = font;
-  const metrics = ctx.measureText('国Agα');
-  let baseline = metrics.actualBoundingBoxAscent || size * .8;
-  const lead = size * 1.24;
-  for (const line of lines) {
-    line.baseline = baseline;
-    baseline += lead;
-  }
-  return { size, lines, font, mathFont, heading };
-}
-
 function placedLines(layout, width, height) {
   return layout.lines.map(line => {
     const y = layout.y + line.baseline;
@@ -295,10 +281,8 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
       if (alternative && (!best || alternative.layout.size > best.layout.size)) best = alternative;
     }
   }
-  if (!best) {
-    const layout = fallbackFit(ctx, units, paragraph, (expanded[2] - expanded[0]) * width, (expanded[3] - expanded[1]) * height, bodySize);
-    if (layout) best = { layout, lines: placedLines(layout, width, height), frame: expanded };
-  }
+  // Incomplete or overflowing text must fail export preflight. Clipping a
+  // partial translation and reporting it as painted silently loses content.
   return best;
 }
 
@@ -318,11 +302,10 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   for (const paragraph of pageOverlays(paragraphs, translations, regions)) {
     // One malformed paragraph (bad box from an upgrade, missing style) must not
     // abort the whole page or the PDF export.
-    if (!Array.isArray(paragraph.box) || paragraph.box.length !== 4
-        || !paragraph.box.every(Number.isFinite)) continue;
+    if (!validBox(paragraph.box)) continue;
     try {
       const neighbors = [...regions.map(region => region.box), ...paragraphs.filter(p => p !== paragraph).map(p => p.box)]
-        .filter(box => Array.isArray(box) && box.length === 4 && box.every(Number.isFinite));
+        .filter(validBox);
       const expanded = expandBox(paragraph, neighbors, width, height, bodySize);
       const units = translationUnits(translations[paragraph.id], paragraph, width, height, neighbors);
       const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(expanded, box) > 0);

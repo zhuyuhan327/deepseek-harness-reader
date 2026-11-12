@@ -788,7 +788,7 @@ function mathShare(paragraph) {
 }
 
 function symbolParagraph(paragraph) {
-  return mathShare(paragraph) > .5 || !/[A-Za-z]{3,}/u.test(paragraph.text);
+  return mathShare(paragraph) > .5 || !/[A-Za-z]{3,}|\p{Script=Han}/u.test(paragraph.text);
 }
 
 /**
@@ -806,7 +806,8 @@ function mergeAdjacentFormulas(paragraphs, typical, viewport, gutter) {
       const b = member.paragraph.box;
       const vertical = (Math.max(a[1], b[1]) - Math.min(a[3], b[3])) * viewport.height;
       const side = (Math.max(a[0], b[0]) - Math.min(a[2], b[2])) * viewport.width;
-      const sameColumn = gutter === null || ((a[0] + a[2]) / 2 < gutter) === ((b[0] + b[2]) / 2 < gutter);
+      const sameColumn = gutter === null || ((a[0] + a[2]) * viewport.width / 2 < gutter)
+        === ((b[0] + b[2]) * viewport.width / 2 < gutter);
       return sameColumn && vertical <= typical * 2.5 && side <= typical * 6;
     }));
     if (near) near.push(member);
@@ -901,10 +902,16 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   // they are not translated as body paragraphs.
   for (const region of regions) {
     if (region.kind !== 'figure') continue;
+    // Measure every label against the original artwork. Growing the region
+    // while testing the next line can chain through headings into body text.
+    const artwork = [...region.box];
     for (const line of lines) {
       if (line.region || CAPTION.test(line.text) || line.text.length > 42) continue;
-      const near = line.box[1] <= region.box[3] + typical * 2.4 && line.box[3] >= region.box[1] - typical * 2.4;
-      const shared = Math.min(line.box[2], region.box[2]) - Math.max(line.box[0], region.box[0]);
+      if (line.bold || /[.!?。！？]$/.test(line.text)
+          || /^\d+(?:\.\d+)*\.?\s+\p{Lu}/u.test(line.text)
+          || /^(?:we|our|the|this|these|where|let|for|in|with|a|an)\s/i.test(line.text)) continue;
+      const near = line.box[1] <= artwork[3] + typical * 2.4 && line.box[3] >= artwork[1] - typical * 2.4;
+      const shared = Math.min(line.box[2], artwork[2]) - Math.max(line.box[0], artwork[0]);
       if (!near || shared < width(line.box) * .5) continue;
       line.region = region;
       region.box = union(region.box, line.box);

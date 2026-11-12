@@ -49,6 +49,33 @@ test('矢量绘制的图表会被识别为图形区域，图内标签不再视�
   assert.ok(label.box[0] >= figure.box[0] && label.box[2] <= figure.box[2]);
 });
 
+test('图形附近的标题与短正文不会被扩大的图形区域吞掉', async () => {
+  const operators = [[OPS.save], [OPS.transform, 180, 0, 0, 120, 100, 500],
+    [OPS.paintImageXObject, 'img', 180, 120], [OPS.restore]];
+  const { paragraphs, regions } = await extractPageLayout(pdfjs, page([
+    run('3. Experiments', 100, 320, 150, 'bold'),
+    run('The results are consistent.', 100, 334, 170),
+  ], operators), viewport, 2);
+  const figure = regions.find(region => region.kind === 'figure');
+  assert.ok(figure);
+  assert.ok(paragraphs.every(p => p.box[1] > figure.box[3]));
+});
+
+test('双栏中靠近栏间的公式不会跨栏聚合', async () => {
+  const items = [];
+  for (const y of [80, 94, 108]) {
+    items.push(run('The left column describes the method.', 60, y, 225));
+    items.push(run('The right column describes the result.', 316, y, 225));
+  }
+  items.push(run('x = a', 220, 160, 65, 'math'), run('y = b', 316, 160, 65, 'math'),
+    run('z = c', 400, 180, 45, 'math'));
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
+  const left = paragraphs.find(p => p.text.includes('x = a'));
+  assert.ok(left);
+  assert.ok(!left.text.includes('y = b') && !left.text.includes('z = c'));
+  assert.ok(left.box[2] < .5);
+});
+
 test('连续公式行合并成一个公式块', async () => {
   const items = [
     run('L(θ)', 90, 120, 40, 'math'),

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,9 +7,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createReader } from '../src/host.js';
 
 async function harness(t, respond, workspaceRegistry = {}, listProviders = () => [{ id: 'deepseek-account' }]) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-lifecycle-'));
+  const temp = await mkdtemp(join(tmpdir(), 'dsh-quiet-reader-lifecycle-'));
+  const root = join(temp, 'library');
+  await mkdir(root);
+  let workspace;
   const reader = createReader({
-    workspaceRegistry: { async create() { return { id: 'test-workspace' }; }, ...workspaceRegistry },
+    workspaceRegistry: {
+      async create(path, title) { return workspace = { id: 'test-workspace', path, title }; },
+      list: () => workspace ? [workspace] : [],
+      ...workspaceRegistry,
+    },
     llm: {
       listProviders,
       listModels: async () => [{ id: 'test-flash', inputModalities: ['text'] }],
@@ -20,16 +27,17 @@ async function harness(t, respond, workspaceRegistry = {}, listProviders = () =>
         yield { type: 'finish', reason: { kind: 'stop' } };
       },
     },
-  }, root);
+  }, join(temp, 'profile', 'papers'));
   t.after(async () => {
     reader.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(temp, { recursive: true, force: true });
   });
 
   async function request(action, id, input) {
     const url = new URL('http://127.0.0.1:8767/api/dsh-quiet-reader');
     url.searchParams.set('action', action);
     if (id) url.searchParams.set('id', id);
+    if (workspace) url.searchParams.set('workspaceId', workspace.id);
     const response = await reader.fetch(new Request(url, {
       method: input === undefined ? 'GET' : 'POST',
       headers: { 'x-quiet-reader': '1' },
@@ -64,8 +72,15 @@ async function harness(t, respond, workspaceRegistry = {}, listProviders = () =>
     assert.fail('翻译未在预期时间内完成');
   }
 
+  const selected = await request('workspace', undefined, { folder: root });
+  assert.equal(selected.status, 200, JSON.stringify(selected.value));
+  async function paperPath(id) {
+    const name = (await readdir(root)).find(entry => entry.endsWith(`-${id}`));
+    assert.ok(name);
+    return join(root, name);
+  }
   const translated = id => waitForDetail(id, value => value.status === 'complete');
-  return { root, request, importPaper, translated, waitForDetail };
+  return { root, request, importPaper, translated, waitForDetail, paperPath };
 }
 
 test('清除译文取消在途模型请求，旧结果不能覆盖随后启动的翻译', { timeout: 4_000 }, async t => {
@@ -159,11 +174,10 @@ test('已有简体中文的文献离线复用原文，不访问模型配置', as
   assert.deepEqual(reopened.translations, completed.translations);
 });
 
-test('列表保留工作区缺失的文献，显式删除取消进行中的问答', { timeout: 4_000 }, async t => {
+test('删除单篇文献取消进行中的问答并保留共享工作区', { timeout: 4_000 }, async t => {
   const questionStarted = Promise.withResolvers();
   const finishQuestion = Promise.withResolvers();
   t.after(() => finishQuestion.resolve());
-  const removedWorkspaces = [];
   const host = await harness(t, async (data, signal) => {
     if (data.question) {
       questionStarted.resolve(signal);
@@ -172,23 +186,24 @@ test('列表保留工作区缺失的文献，显式删除取消进行中的问�
     }
     return '{"1":"该方法改善了图像重建。"}';
   }, {
-    list: () => [],
-    async delete(id) { removedWorkspaces.push(id); },
+    async delete() { assert.fail('不应删除共享工作区'); },
   });
   const { id } = await host.importPaper();
   await host.translated(id);
   const list = await host.request('list');
   assert.deepEqual(list.value.map(paper => paper.id), [id]);
-  await access(join(host.root, id, 'original.pdf'));
+  const directory = await host.paperPath(id);
+  await access(join(directory, 'original.pdf'));
 
   const question = host.request('ask', id, { question: '论文的主要结论是什么？' });
   const questionSignal = await questionStarted.promise;
   const removed = await host.request('delete', id, {});
   assert.equal(removed.status, 200);
-  assert.deepEqual(removedWorkspaces, ['test-workspace']);
   assert.equal(questionSignal.aborted, true);
   assert.equal((await question).status, 409);
-  await assert.rejects(access(join(host.root, id, 'original.pdf')), { code: 'ENOENT' });
+  await assert.rejects(access(directory), { code: 'ENOENT' });
+  await access(host.root);
+  assert.equal((await host.request('workspace')).value.workspace.id, 'test-workspace');
 
   finishQuestion.resolve();
   const reopened = await host.importPaper();
@@ -196,13 +211,14 @@ test('列表保留工作区缺失的文献，显式删除取消进行中的问�
   assert.deepEqual((await host.translated(id)).history, []);
 });
 
-test('工作区删除失败时保留原文和已有译文', async t => {
-  const host = await harness(t, async () => '{"1":"该方法改善了图像重建。"}', {
-    async delete() { throw new Error('workspace table write failed'); },
-  });
+test('清除译文保留原始 PDF 和已有问答', async t => {
+  const host = await harness(t, async data => data.question ? '本文验证了重建方法。' : '{"1":"该方法改善了图像重建。"}');
   const { id } = await host.importPaper();
   await host.translated(id);
-  assert.equal((await host.request('delete', id, {})).status, 502);
-  await access(join(host.root, id, 'original.pdf'));
-  assert.equal((await host.request('detail', id)).value.translated, 1);
+  assert.equal((await host.request('ask', id, { question: '论文的结论是什么？' })).status, 200);
+  const reset = await host.request('reset', id, {});
+  assert.equal(reset.status, 200);
+  assert.equal(reset.value.translated, 0);
+  assert.equal(reset.value.history[0].answer, '本文验证了重建方法。');
+  await access(join(await host.paperPath(id), 'original.pdf'));
 });

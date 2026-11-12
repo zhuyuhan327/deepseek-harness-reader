@@ -34,7 +34,7 @@ window.__ModuleLoader__.load({
       const response = await fetch(endpoint(action, params, body !== undefined), options);
       const result = await response.json().catch(() => null);
       if (!response.ok || result === null) {
-        throw new Error(result?.error ?? '阅读服务暂时不可用，请检查插件是否已启用。');
+        throw Object.assign(new Error(result?.error ?? '阅读服务暂时不可用，请检查插件是否已启用。'), { code: result?.code });
       }
       return result;
     }
@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
       const metadata = await handle.document.getMetadata().catch(() => ({}));
       const embeddedTitle = metadata.info?.Title;
       const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || String(filename ?? 'paper').replace(/\.pdf$/i, '');
-      return { title, pages, paragraphs, regions, layoutVersion: 11, range: { first, last } };
+      return { title, pages, paragraphs, regions, layoutVersion: 12, range: { first, last } };
     }
 
     function place(box) {
@@ -146,7 +146,7 @@ window.__ModuleLoader__.load({
       const first = paper.range?.first ?? 1;
       const last = paper.range?.last ?? paper.pages.length;
       if (mode !== 'original' && !paper.translated) throw new Error('这篇文献还没有可导出的译文。');
-      const response = await fetch(endpoint('pdf', { id: paper.id }));
+      const response = await fetch(endpoint('pdf', { id: paper.id, workspaceId: paper.workspaceId }));
       if (!response.ok) throw new Error('无法读取原始 PDF。');
       const data = new Uint8Array(await response.arrayBuffer());
       if (mode === 'original' && first === 1 && last === paper.pages.length) return data;
@@ -263,7 +263,7 @@ window.__ModuleLoader__.load({
         let handle;
         void (async () => {
           try {
-            const response = await fetch(endpoint('pdf', { id: paper.id }), { signal: abort.signal });
+            const response = await fetch(endpoint('pdf', { id: paper.id, workspaceId: paper.workspaceId }), { signal: abort.signal });
             if (!response.ok) throw new Error('无法读取原始 PDF。');
             const presentation = await loadPresentation();
             handle = await openPdf(new Uint8Array(await response.arrayBuffer()));
@@ -351,16 +351,47 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       let selectedPaper = '';
+      let snapshot = { workspace: null, checked: false, items: [] };
+      let workspaceCheck;
+      let workspaceGeneration = 0;
+      const notify = () => { for (const listener of listeners) listener(); };
+      const updateWorkspace = workspace => {
+        const changed = workspace?.id !== snapshot.workspace?.id;
+        snapshot = { workspace, checked: true, items: changed ? [] : snapshot.items };
+        if (changed) selectedPaper = '';
+        notify();
+      };
+      const checkWorkspace = () => {
+        if (workspaceCheck) return workspaceCheck;
+        const generation = workspaceGeneration;
+        workspaceCheck = request('workspace').then(({ workspace }) => {
+          if (generation === workspaceGeneration) updateWorkspace(workspace);
+          return snapshot.workspace;
+        }).finally(() => { workspaceCheck = undefined; });
+        return workspaceCheck;
+      };
       // Cordis requires an explicit injection before a service can be read.
       let pickDirectory = null;
+      let openReader = () => {};
       if (typeof ctx.inject === 'function') {
         ctx.inject(['uiWorkspace'], scoped => {
           pickDirectory = () => scoped.uiWorkspace.pickDirectory();
           return () => { pickDirectory = null; };
         });
+        ctx.inject(['layout'], scoped => {
+          openReader = () => scoped.layout?.selectPanel(PANEL);
+          return () => { openReader = () => {}; };
+        });
       }
       const listeners = new Set();
-      const refresh = signal => request('list', {}, undefined, signal);
+      const refresh = async (signal, workspaceId = snapshot.workspace?.id) => {
+        if (!workspaceId) return [];
+        const items = await request('list', { workspaceId }, undefined, signal);
+        if (!signal?.aborted && snapshot.workspace?.id === workspaceId) {
+          snapshot = { ...snapshot, items }; notify();
+        }
+        return items;
+      };
       const choosePaper = id => {
         selectedPaper = id;
         for (const listener of listeners) listener();
@@ -372,10 +403,22 @@ window.__ModuleLoader__.load({
       function ReaderPanel(props) {
         const id = useSyncExternalStore(subscribe, () => selectedPaper);
         const useWorkspaces = props && typeof props.useWorkspaces === 'function' ? props.useWorkspaces : null;
-        const useSession = props && typeof props.useSession === 'function' ? props.useSession : null;
         const workspaceState = useWorkspaces ? useWorkspaces(state => state) : null;
-        const sessionState = useSession ? useSession(state => state ?? null) : null;
-        const [library, setLibrary] = useState([]);
+        const workspaceView = useSyncExternalStore(subscribe, () => snapshot);
+        const workspace = workspaceView.workspace;
+        const library = workspaceView.items;
+        const workspaceId = workspace?.id;
+        const call = async (action, params = {}, body, signal) => {
+          if (!workspaceId || snapshot.workspace?.id !== workspaceId) throw new Error('请先选择工作区。');
+          try {
+            const value = await request(action, { ...params, workspaceId }, body, signal);
+            if (snapshot.workspace?.id !== workspaceId) throw new Error('工作区已切换，请重新打开文献。');
+            return value;
+          } catch (error) {
+            if (['WORKSPACE_REQUIRED', 'WORKSPACE_CHANGED'].includes(error.code)) void checkWorkspace().catch(() => {});
+            throw error;
+          }
+        };
         const [paper, setPaper] = useState(null);
         const [number, setNumber] = useState(1);
         const [selected, setSelected] = useState(null);
@@ -385,18 +428,23 @@ window.__ModuleLoader__.load({
         const [asking, setAsking] = useState(false);
         const [revision, setRevision] = useState(0);
         const [pending, setPending] = useState(null);
-        const [saveFolder, setSaveFolder] = useState(() => {
-          try { return localStorage.getItem('dsh-quiet-reader:folder') ?? ''; } catch { return ''; }
-        });
         const chooseFolder = async () => {
+          if (busy || pending) return;
+          setError('');
+          setBusy('正在选择工作区');
           try {
-            const picked = await pickDirectory?.();
+            if (!pickDirectory) throw new Error('文件夹选择器尚未就绪，请稍后重试。');
+            const picked = await pickDirectory();
             if (!picked) return;
-            setSaveFolder(picked);
-            try { localStorage.setItem('dsh-quiet-reader:folder', picked); } catch {}
+            await workspaceCheck;
+            workspaceGeneration++;
+            const result = await request('workspace', {}, { folder: picked });
+            workspaceGeneration++;
+            updateWorkspace(result.workspace);
+            await refresh();
           } catch (e) { setError(e.message); }
+          finally { setBusy(''); }
         };
-        const folderPrompted = useRef(false);
         const [fromPage, setFromPage] = useState('');
         const [toPage, setToPage] = useState('');
         const [exportOpen, setExportOpen] = useState(false);
@@ -416,24 +464,21 @@ window.__ModuleLoader__.load({
         const file = useRef(null);
         const active = useRef('');
         active.current = id;
-        useEffect(() => {
-          if (folderPrompted.current || saveFolder || id) return;
-          folderPrompted.current = true;
-          void chooseFolder();
-        }, []);
-        useEffect(() => {
-          if (!saveFolder) return;
-          try { localStorage.setItem('dsh-quiet-reader:folder', saveFolder); } catch {}
-        }, [saveFolder]);
         useEffect(() => () => {
           if (pending) void pending.handle.task.destroy().catch(() => {});
         }, [pending]);
         useEffect(() => {
-          const controller = new AbortController();
-          void refresh(controller.signal).then(setLibrary).catch(e => {
-            if (!controller.signal.aborted) setError(e.message);
-          });
-          return () => controller.abort();
+          let stopped = false;
+          let timer;
+          const sync = async () => {
+            try {
+              const current = await checkWorkspace();
+              if (!stopped && current) await refresh(undefined, current.id);
+            } catch (e) { if (!stopped) setError(e.message); }
+            if (!stopped) timer = setTimeout(sync, 3000);
+          };
+          void sync();
+          return () => { stopped = true; clearTimeout(timer); };
         }, []);
         // Model catalogue and the saved choice: read from Harness on every open
         // so models released later show up without a plugin update.
@@ -446,30 +491,7 @@ window.__ModuleLoader__.load({
           }).catch(() => {});
           return () => controller.abort();
         }, []);
-        // Workspaces added or removed in the DSH sidebar show up here: refresh
-        // the library, follow the selected workspace, and drop a paper whose
-        // workspace disappeared.
-        useEffect(() => {
-          if (!workspaceState) return;
-          let cancelled = false;
-          void refresh().then(items => {
-            if (cancelled) return;
-            setLibrary(items);
-            const items2 = workspaceState.items ?? [];
-            const sessionId = sessionState?.sessionId ?? sessionState?.id;
-            const workspace = sessionId !== undefined
-              ? items2.find(item => (item.sessionIds ?? []).includes(sessionId))
-              : undefined;
-            if (workspace) {
-              const match = items.find(item => item.workspaceId === workspace.workspaceId);
-              if (match && match.id !== selectedPaper) choosePaper(match.id);
-            }
-            if (selectedPaper && !items.some(item => item.id === selectedPaper)) {
-              choosePaper('');
-            }
-          }).catch(() => {});
-          return () => { cancelled = true; };
-        }, [workspaceState, sessionState]);
+        useEffect(() => { void checkWorkspace().catch(e => setError(e.message)); }, [workspaceState]);
         useEffect(() => {
           setPaper(null);
           setNumber(1);
@@ -477,14 +499,15 @@ window.__ModuleLoader__.load({
           setQuestion('');
           setError('');
           setAsking(false);
-        }, [id]);
+          setPending(null);
+        }, [id, workspaceId]);
         useEffect(() => {
-          if (!id) return;
+          if (!id || !workspaceId) return;
           const controller = new AbortController();
           let timer;
           const poll = async () => {
             try {
-              const result = await request('detail', { id }, undefined, controller.signal);
+              const result = await call('detail', { id }, undefined, controller.signal);
               if (controller.signal.aborted) return;
               setPaper(current => current?.id === id ? { ...result, history: current.history } : result);
               if (result.status === 'running') timer = setTimeout(poll, 1500);
@@ -497,12 +520,12 @@ window.__ModuleLoader__.load({
           };
           void poll();
           return () => { controller.abort(); clearTimeout(timer); };
-        }, [id, revision]);
+        }, [id, workspaceId, revision]);
 
         async function chooseFile(event) {
           const chosen = event.currentTarget.files[0];
           event.currentTarget.value = '';
-          if (!chosen || busy) return;
+          if (!chosen || busy || !workspaceId) return;
           if (chosen.size === 0 || chosen.size > PDF_LIMIT) {
             setError(`请选择 ${PDF_LIMIT_MB} MB 以内的 PDF。`);
             return;
@@ -515,7 +538,11 @@ window.__ModuleLoader__.load({
               await handle.task.destroy();
               throw new Error('第一版支持 150 页以内的 PDF。');
             }
-            setPending({ file: chosen, handle, numPages: handle.document.numPages });
+            if (snapshot.workspace?.id !== workspaceId) {
+              await handle.task.destroy();
+              throw new Error('工作区已切换，请重新选择 PDF。');
+            }
+            setPending({ file: chosen, handle, numPages: handle.document.numPages, workspaceId });
             setFromPage('1');
             setToPage(String(handle.document.numPages));
           } catch (e) {
@@ -536,12 +563,16 @@ window.__ModuleLoader__.load({
           const form = new FormData();
           form.set('pdf', chosen);
           form.set('document', JSON.stringify(parsed));
-          if (saveFolder.trim()) form.set('folder', saveFolder.trim());
-          return request('import', {}, form);
+          return call('import', {}, form);
         }
 
         async function confirmRange() {
           if (!pending) return;
+          if (pending.workspaceId !== workspaceId) {
+            setPending(null);
+            setError('工作区已切换，请重新选择 PDF。');
+            return;
+          }
           const { file: chosen, handle, numPages } = pending;
           const first = Number(fromPage);
           const last = Number(toPage);
@@ -559,7 +590,7 @@ window.__ModuleLoader__.load({
             }
             choosePaper(imported.id);
             setPending(null);
-            setLibrary(await refresh());
+            await refresh();
           } catch (e) {
             setError(e.message || 'PDF 无法解析。请确认文件可打开且未加密。');
           } finally {
@@ -573,7 +604,7 @@ window.__ModuleLoader__.load({
           setError('');
           let handle;
           try {
-            const response = await fetch(endpoint('pdf', { id }));
+            const response = await fetch(endpoint('pdf', { id, workspaceId: paper.workspaceId }));
             if (!response.ok) throw new Error('无法读取原始 PDF。');
             const chosen = new File([await response.blob()], `${paper.title}.pdf`, { type: 'application/pdf' });
             handle = await openPdf(new Uint8Array(await chosen.arrayBuffer()));
@@ -617,7 +648,7 @@ window.__ModuleLoader__.load({
         async function retry() {
           setError('');
           try {
-            const updated = await request('translate', { id }, {});
+            const updated = await call('translate', { id }, {});
             if (active.current === id) {
               setPaper(updated);
               setRevision(value => value + 1);
@@ -628,7 +659,7 @@ window.__ModuleLoader__.load({
         async function pauseTranslation() {
           setError('');
           try {
-            const updated = await request('pause', { id }, {});
+            const updated = await call('pause', { id }, {});
             if (active.current === id) {
               setPaper(updated);
               setRevision(value => value + 1);
@@ -638,10 +669,10 @@ window.__ModuleLoader__.load({
 
         async function clearTranslations() {
           if (!paper || busy) return;
-          if (!window.confirm('确定清除这篇文献的全部译文与问答记录吗？原文和工作区会保留。')) return;
+          if (!window.confirm('确定清除这篇文献的全部译文吗？原文、问答记录和文献目录会保留。')) return;
           setError('');
           try {
-            const updated = await request('reset', { id }, {});
+            const updated = await call('reset', { id }, {});
             if (active.current === id) {
               setPaper(updated);
               setRevision(value => value + 1);
@@ -654,10 +685,10 @@ window.__ModuleLoader__.load({
           if (!window.confirm(`确定删除《${paper.title}》吗？原文、译文与问答记录都会被删除，且无法恢复。`)) return;
           setError('');
           try {
-            await request('delete', { id }, {});
+            await call('delete', { id }, {});
             choosePaper('');
             setPaper(null);
-            setLibrary(await refresh());
+            await refresh();
           } catch (e) { if (active.current === id) setError(e.message); }
         }
 
@@ -667,7 +698,7 @@ window.__ModuleLoader__.load({
           setAsking(true);
           setError('');
           try {
-            const history = await request('ask', { id }, { question, page: number, selectedId: selected });
+            const history = await call('ask', { id }, { question, page: number, selectedId: selected });
             if (active.current === id) {
               setPaper(current => current?.id === id ? { ...current, history } : current);
               setQuestion('');
@@ -720,7 +751,7 @@ window.__ModuleLoader__.load({
         const firstPage = paper?.range?.first ?? 1;
         const lastPage = paper?.range?.last ?? paper?.pages.length ?? 1;
         const layoutPages = new Set(paper?.layoutPages);
-        const needsLayout = paper && (paper.layoutVersion !== 11 ||
+        const needsLayout = paper && (paper.layoutVersion !== 12 ||
           Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i).some(page => !layoutPages.has(page)));
         const activeParagraphs = new Set(paper?.paragraphs.map(p => p.id));
         const untranslated = (paper?.paragraphs ?? []).filter(p =>
@@ -755,7 +786,10 @@ window.__ModuleLoader__.load({
                 h('option', { value: '' }, '选择文献'),
                 ...library.map(item => h('option', { key: item.id, value: item.id }, item.title)))),
               h('input', { ref: file, type: 'file', accept: 'application/pdf,.pdf', hidden: true, onChange: chooseFile }),
-              h('button', { type: 'button', className: 'qr-primary', disabled: !!busy || !!pending, onClick: () => file.current.click() }, '上传 PDF'))),
+              h('button', { type: 'button', className: 'qr-primary', disabled: !workspaceId || !!busy || !!pending, onClick: () => file.current.click() }, '上传 PDF'))),
+          h('section', { className: 'qr-workspace-gate' },
+            h('p', { role: 'status' }, !workspaceView.checked ? '正在读取工作区…' : workspace ? '当前工作区：' + workspace.path : '请先选择一个文件夹作为阅读工作区，再上传或打开文献。'),
+            h('button', { type: 'button', disabled: !!busy || !!pending, onClick: chooseFolder }, workspace ? '切换工作区' : '选择工作区文件夹')),
           h('p', { className: 'qr-hint' }, '上传后会先让你选择页码范围。只翻译所选页的标题、正文与图注，公式与参考文献保持原样。'),
           pending && h('section', { className: 'qr-dialog', role: 'dialog', 'aria-label': '选择页码范围' },
             h('h3', null, '选择要翻译的页码范围'),
@@ -771,10 +805,7 @@ window.__ModuleLoader__.load({
                   type: 'number', min: 1, max: pending.numPages, value: toPage, 'aria-label': '结束页',
                   onChange: e => setToPage(e.target.value),
                 }), ' 页')),
-            h('div', { className: 'qr-actions' },
-              h('button', { type: 'button', onClick: chooseFolder, disabled: !!busy },
-                saveFolder ? '更改工作文件夹' : '选择工作文件夹'),
-              saveFolder && h('code', { className: 'qr-folder' }, saveFolder)),
+            h('p', { className: 'qr-folder' }, workspace?.path),
             h('p', { className: 'qr-hint' }, `格式：1–${pending.numPages} 的整数，起始页不能大于结束页。`),
             h('div', { className: 'qr-actions' },
               h('button', { type: 'button', className: 'qr-primary', disabled: !!busy, onClick: confirmRange },
@@ -782,7 +813,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: !!busy, onClick: cancelPending }, '取消'))),
           busy && h('p', { role: 'status' }, busy),
           error && h('p', { className: 'qr-error', role: 'alert' }, error),
-          !paper ? h('p', null, id ? '正在打开文献…' : '上传文字型英文 PDF，创建专属工作区并启动全文翻译。只翻译摘要、正文与图表注释，公式和参考文献保留原样。') :
+          !paper ? h('p', null, id ? '正在打开文献…' : '上传文字型英文 PDF，在所选工作区创建文献子目录并启动全文翻译。只翻译摘要、正文与图表注释，公式和参考文献保留原样。') :
             h(React.Fragment, null,
               h('h2', null, paper.title),
               h('div', { className: 'qr-toolbar' },
@@ -900,7 +931,35 @@ window.__ModuleLoader__.load({
                   h('button', { className: 'qr-primary', disabled: asking || !question.trim() }, asking ? '正在回答…' : '提问')))));
       }
 
+      // Harness exposes a sidebar list seat, but no per-workspace child seat.
+      // Keep its native workspaces intact and contribute a separate paper tree.
+      function ReaderTree(props) {
+        const view = useSyncExternalStore(subscribe, () => snapshot);
+        const currentId = useSyncExternalStore(subscribe, () => selectedPaper);
+        const [expanded, setExpanded] = useState(true);
+        const active = props.usePanelInfo ? props.usePanelInfo(info => info.activePanelId === PANEL) : true;
+        const workspaces = props.useWorkspaces ? props.useWorkspaces(value => value) : null;
+        useEffect(() => { void checkWorkspace().catch(() => {}); }, [workspaces]);
+        useEffect(() => { setExpanded(true); }, [view.workspace?.id]);
+        if (!active || props.wide === false || !view.workspace) return null;
+        return h('nav', { 'aria-label': '阅读工作区文献', style: { width: '100%', minWidth: 0, maxHeight: '42vh', overflow: 'auto', fontSize: 13 } },
+          h('details', { key: view.workspace.id, open: expanded, onToggle: event => {
+            if (event.target === event.currentTarget) setExpanded(event.currentTarget.open);
+          } },
+            h('summary', { title: view.workspace.path, style: { cursor: 'pointer', overflowWrap: 'anywhere' } }, '📁 ', view.workspace.title),
+            !view.items.length && h('p', { style: { paddingLeft: 16 } }, '暂无文献，请先上传 PDF'),
+            ...view.items.map(item => h('details', { key: item.id, style: { margin: '6px 0 6px 14px' } },
+              h('summary', { style: { cursor: 'pointer', overflowWrap: 'anywhere' } }, '📁 ', item.title),
+              h('button', { type: 'button', onClick: () => { choosePaper(item.id); openReader(); },
+                'aria-current': currentId === item.id ? 'page' : undefined,
+                style: { margin: '6px 0 6px 16px', cursor: 'pointer', color: 'inherit', background: 'transparent', border: '1px solid currentColor', borderRadius: 4 } }, '打开文献'),
+              h('div', { style: { paddingLeft: 16, opacity: .75 } }, '原文 · 译文 · 问答')))));
+      }
+
       ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL }, ReaderPanel));
+      ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+        name: 'sidebar.footer.action', id: PANEL + '-papers', order: 10,
+      }, ReaderTree));
       ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
         name: 'sidebar.panellist', id: PANEL, label: '阅读模式', order: 62,
       }, ({ size }) => h('span', { style: { fontSize: size || 16 }, 'aria-hidden': true }, '▤')));

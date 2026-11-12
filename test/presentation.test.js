@@ -114,22 +114,24 @@ test('版面数据异常的段落不会中断整页绘制', () => {
   const paragraphs = [
     { id: 1, kind: 'text', text: 'Broken', box: [0.1, 0.1, NaN, 0.2], style: { size: 10 } },
     { id: 2, kind: 'text', text: 'Fine', box: [0.1, 0.3, 0.6, 0.36], style: { size: 10 } },
+    { id: 3, kind: 'text', text: 'Missing box', box: null },
+    { id: 4, kind: 'formula', text: 'Bad formula', box: undefined },
   ];
-  const drawn = paintTranslation(canvas, page, page, paragraphs, { 1: '损坏', 2: '正常' });
+  const drawn = paintTranslation(canvas, page, page, paragraphs, { 1: '损坏', 2: '正常', 3: '缺少位置' });
   assert.deepEqual(drawn.map(line => line.paragraphId), [2]);
+  assert.deepEqual(expectedOverlays(paragraphs, { 1: '损坏', 2: '正常', 3: '缺少位置' }).map(p => p.id), [1, 2, 3]);
   assert.ok(events.some(event => event.type === 'text' && event.text === '正常'));
 });
 
-test('极窄区域也会排版译文并裁剪在本块内，不遮盖相邻内容', () => {
+test('放不下的译文保留原文并由预检报告，不生成无效坐标或裁剪掉正文', () => {
   const { canvas, events } = recordingCanvas();
   const page = { width: 200, height: 200 };
   const paragraph = { id: 1, kind: 'text', text: 'An extremely narrow region', box: [.1, .1, .18, .13],
     style: { size: 5.5 } };
   const lines = paintTranslation(canvas, page, page, [paragraph], { 1: '这是一段需要完整保存的译文'.repeat(3) });
-  assert.equal(lines.length > 0, true);
-  assert.ok(lines.every(line => line.size <= 5.5));
-  assert.ok(events.filter(event => event.type === 'mask').length >= 1);
-  assert.ok(events.some(event => event.type === 'text'));
+  assert.deepEqual(lines, []);
+  assert.equal(events.filter(event => event.type === 'mask').length, 0);
+  assert.equal(events.filter(event => event.type === 'text').length, 0);
 });
 
 test('图形遮挡的图注仍需报告未排版，重叠的同文副本只计一次', () => {
@@ -150,4 +152,5 @@ test('与公式重叠的正文仍会输出译文，不再从导出中消失', ()
   const lines = paintTranslation(canvas, page, page, [text, formula], { 1: '其中 x 是该值' });
   assert.equal(lines.length > 0, true);
   assert.equal(lines[0].paragraphId, 1);
+  assert.ok(lines.every(line => [line.x, line.y, line.width, line.size].every(Number.isFinite)));
 });

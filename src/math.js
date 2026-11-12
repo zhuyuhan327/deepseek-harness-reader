@@ -1,6 +1,13 @@
 import { MAX_TRANSLATION_LENGTH, looksComplete, isRefusal } from './translation-response.js';
 
 const MATH_MARKER = /⟦M+:[^⟦⟧\r\n]*(?:⟧|(?=⟦|[\r\n]|$))/g;
+const MARKER_START = String.raw`(?:⟦|【|［|\[\[?)[ \t]*([MmＭｍ]+)[ \t]*[:：]`;
+const MARKER_FIELDS = String.raw`[ \t]*[0-9０-９]+[ \t]*[:：][ \t]*[0-9０-９]+(?![0-9０-９:：])`;
+const MARKER_END = String.raw`(?:[ \t]*(?:⟧|】|］|\]\]?)|(?=$|[\s\p{Script=Han}\p{P}]))`;
+const MARKER_OCCURRENCE = `${MARKER_START}${MARKER_FIELDS}${MARKER_END}`;
+const MARKER_PREFIX = new RegExp(MARKER_START, 'u');
+const MARKER_PREFIXES = new RegExp(MARKER_START, 'gu');
+const MARKER_PARTS = /([MmＭｍ]+)\s*[:：]\s*([0-9０-９]+)\s*[:：]\s*([0-9０-９]+)/u;
 const MATH_LETTERS = String.raw`\p{Script=Greek}\u{1D400}-\u{1D7FF}ℂℋℎℓℒℕℙℚℝℤℵ`;
 const VARIABLE = String.raw`[A-Za-z${MATH_LETTERS}]`;
 const SCRIPT_CHARS = String.raw`¹²³\u1D2C-\u1D6A\u2070-\u209F`;
@@ -13,6 +20,7 @@ const RIGHT_BOUNDARY = String.raw`(?![A-Za-z0-9_\p{Script=Greek}])`;
 const OPERATOR = String.raw`(?:[<>!=]=|[=<>≤≥≈≠∼∝∈∉⊆⊂⊃⊇±×÷⋅*/+→↦−|]|(?<=\s)-(?=\s))`;
 const INLINE_MATH = [
   MATH_MARKER,
+  new RegExp(MARKER_OCCURRENCE, 'gu'),
   /\[\s*\d+(?:\s*[,;，–-]\s*\d+)*\s*\]/g,
   /\\\([^\r\n]{1,200}?\\\)/g,
   new RegExp(String.raw`\$${ATOM}(?:\s*${OPERATOR}\s*${ATOM})*\$`, 'gu'),
@@ -61,13 +69,14 @@ export function protectMath(text, spans = [], paragraphId = 0) {
   const merged = [];
   for (const { start, end } of ranges) {
     const previous = merged.at(-1);
-    const adjacentMath = previous && !/[\[⟦]/.test(source[start]) && !/[\[⟦]/.test(source[previous.start]) &&
+    const adjacentMath = previous && !/[\[⟦【［]/.test(source[start]) && !/[\[⟦【［]/.test(source[previous.start]) &&
       /^[ \t]*$/.test(source.slice(previous.end, start));
     if (previous && (start < previous.end || adjacentMath)) previous.end = Math.max(previous.end, end);
     else merged.push({ start, end });
   }
   let prefix = 'M';
-  while (source.includes(`⟦${prefix}:`)) prefix += 'M';
+  const usedPrefixes = new Set([...source.matchAll(MARKER_PREFIXES)].map(match => match[1].normalize('NFKC').toUpperCase()));
+  while (usedPrefixes.has(prefix)) prefix += 'M';
   let cursor = 0;
   let protectedText = '';
   const tokens = merged.map(({ start, end }, index) => {
@@ -91,18 +100,14 @@ export function restoreMath(text, tokens) {
   return valid && index === tokens.length ? restored : null;
 }
 
-const MARKER_START = String.raw`(?:⟦|【|［|\[\[?)[ \t]*[MmＭｍ]+[ \t]*[:：]`;
-const MARKER_FIELDS = String.raw`[ \t]*[0-9０-９]+[ \t]*[:：][ \t]*[0-9０-９]+(?![0-9０-９:：])`;
-const MARKER_END = String.raw`(?:[ \t]*(?:⟧|】|］|\]\]?)|(?=$|[\s\p{Script=Han}\p{P}]))`;
-const MARKER_PREFIX = new RegExp(MARKER_START, 'u');
-const MARKER_PARTS = /([MmＭｍ]+)\s*[:：]\s*([0-9０-９]+)\s*[:：]\s*([0-9０-９]+)/u;
 const escapePattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const MATH_WORD = String.raw`[A-Za-z0-9_^${MATH_LETTERS}${SCRIPT_CHARS}]`;
+const MATH_WORD_END = new RegExp(`${MATH_WORD}$`, 'u');
 
 function literalMathPattern(value) {
   const standalone = /^[A-Za-z0-9_\p{Script=Greek}]+$/u.test(value);
   const left = standalone ? String.raw`(?<![A-Za-z0-9_\p{Script=Greek}])` : '';
-  const right = standalone ? String.raw`(?![A-Za-z0-9_^\p{Script=Greek}${SCRIPT_CHARS}]|\.\d)`
-    : /[0-9]$/.test(value) ? String.raw`(?![0-9]|\.\d)` : '';
+  const right = MATH_WORD_END.test(value) ? String.raw`(?!${MATH_WORD}|\.\d)` : '';
   return `${left}${escapePattern(value)}${right}`;
 }
 
@@ -113,7 +118,7 @@ export function restoreMathTolerant(text, tokens) {
   const literals = new Set(tokens.map(token => token.value));
   const alternatives = [...literals].sort((a, b) => b.length - a.length).map(literalMathPattern);
   const markers = new Map(tokens.map(token => [token.marker, token]));
-  const occurrences = new RegExp([`${MARKER_START}${MARKER_FIELDS}${MARKER_END}`, ...alternatives].join('|'), 'gu');
+  const occurrences = new RegExp([MARKER_OCCURRENCE, ...alternatives].join('|'), 'gu');
   const found = [];
   let hasMarkers = false;
   let cursor = 0;

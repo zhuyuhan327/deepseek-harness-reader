@@ -67,7 +67,8 @@ function splitBatches(items, maxParts = BATCH_PARAGRAPHS, maxChars = BATCH_CHARS
 function alreadySimplified(text) {
   const prose = text.replace(/⟦M+:\d+:\d+⟧/g, '');
   return /^[\p{Script=Han}\p{N}\p{P}\p{S}\s]+$/u.test(prose) &&
-    /[这为图对经发还应结从项进测训练变归观读译]/u.test(prose) && !/[這為圖對經發還應結從項進測訓練變歸觀讀譯]/u.test(prose);
+    /[这为图对经发还应结从项进测训练变归观读译]/u.test(prose) &&
+    !/[這為圖對經發還應結從項進測訓練變歸觀讀譯論學術數據實驗顯說設計處機網絡決採範圍參與視頻較統資歷臺灣]/u.test(prose);
 }
 
 function groupFragments({ paragraphs, sequence }) {
@@ -137,7 +138,7 @@ export async function translateDocument({ document, translations, request, save,
     catch (error) {
       // An unusable answer is a paragraph failure, unlike an unavailable
       // account, connection or storage. Later paragraphs can still succeed.
-      if (!['NO_CONTENT', 'OUTPUT_LIMIT'].includes(error?.code)) throw error;
+      if (!['NO_CONTENT', 'OUTPUT_LIMIT', 'UNEXPECTED_TOOL'].includes(error?.code)) throw error;
       return { text: '', finished: false };
     }
   }
@@ -197,7 +198,8 @@ export async function translateDocument({ document, translations, request, save,
       // Short clauses need far fewer output tokens than full paragraphs. Pack
       // them more densely so a normal formula-heavy paragraph can still fit
       // within the bounded supplementary budget.
-      const batches = splitBatches(parts, BATCH_PARAGRAPHS * 3, Math.floor(BATCH_CHARS / 2));
+      const partsPerBatch = Math.max(BATCH_PARAGRAPHS * 3, Math.ceil(parts.length / fallbackCalls));
+      const batches = splitBatches(parts, partsPerBatch, Math.floor(BATCH_CHARS / 2));
       if (batches.length && batches.length <= fallbackCalls) {
         const values = new Map();
         for (const paragraphs of batches) {

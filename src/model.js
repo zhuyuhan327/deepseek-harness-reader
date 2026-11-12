@@ -10,6 +10,7 @@ export class ReaderError extends Error {
 }
 
 export async function accountRoute(llm, signal) {
+  signal?.throwIfAborted();
   if (!llm.listProviders().some(provider => provider.id === PROVIDER)) {
     throw new ReaderError('请在 Harness 的账号设置中启用 DeepSeek 账号模型。', 503);
   }
@@ -17,7 +18,9 @@ export async function accountRoute(llm, signal) {
     !model.inputModalities || model.inputModalities.includes('text'));
   const model = models.find(item => /flash/i.test(item.id)) ?? models[0];
   if (!model) throw new ReaderError('请先登录 DeepSeek 账号，并确认账号模型可用。', 401);
+  signal?.throwIfAborted();
   const info = await llm.resolveModelInfo?.(PROVIDER, model.id, signal);
+  signal?.throwIfAborted();
   const route = { provider: PROVIDER, model: model.id };
   if (info?.reasoning?.efforts?.some(effort => effort.id === 'off')) {
     route.reasoningEffort = 'off';
@@ -31,29 +34,49 @@ export async function accountRoute(llm, signal) {
  * and a newly published model works without a plugin update.
  */
 export async function routeFor(llm, preference, signal, { translation = false } = {}) {
+  signal?.throwIfAborted();
   const provider = typeof preference?.provider === 'string' ? preference.provider : '';
   const model = typeof preference?.model === 'string' ? preference.model : '';
   if (provider && model && llm.listProviders().some(item => item.id === provider)) {
+    let models;
     try {
-      const models = await llm.listModels(provider);
-      if ((models ?? []).some(item => item.id === model)) {
-        const route = { provider, model };
-        const info = await llm.resolveModelInfo?.(provider, model, signal);
-        const efforts = info?.reasoning?.efforts ?? [];
-        const economy = translation && preference?.translationMode !== 'custom' && efforts.some(effort => effort.id === 'off');
-        const wanted = economy ? 'off' : typeof preference?.reasoningEffort === 'string' ? preference.reasoningEffort : '';
-        if (wanted && efforts.some(effort => effort.id === wanted)) route.reasoningEffort = wanted;
-        else if (efforts.some(effort => effort.id === 'off')) route.reasoningEffort = 'off';
-        return route;
-      }
+      models = await llm.listModels(provider);
     } catch {
-      // Fall through to the default route.
       signal?.throwIfAborted();
+      throw new ReaderError('暂时无法读取所选模型列表，请稍后重试。', 502, 'MODEL_INFO');
+    }
+    signal?.throwIfAborted();
+    if (models?.some(item => item.id === model && (!item.inputModalities || item.inputModalities.includes('text')))) {
+      const route = { provider, model };
+      let info;
+      try { info = await llm.resolveModelInfo?.(provider, model, signal); }
+      catch {
+        signal?.throwIfAborted();
+        throw new ReaderError('暂时无法读取所选模型的推理设置，请稍后重试。', 502, 'MODEL_INFO');
+      }
+      signal?.throwIfAborted();
+      const efforts = info?.reasoning?.efforts ?? [];
+      const economy = translation && preference?.translationMode !== 'custom' && efforts.some(effort => effort.id === 'off');
+      const wanted = economy ? 'off' : typeof preference?.reasoningEffort === 'string' ? preference.reasoningEffort : '';
+      if (wanted && efforts.some(effort => effort.id === wanted)) route.reasoningEffort = wanted;
+      else if (efforts.some(effort => effort.id === 'off')) route.reasoningEffort = 'off';
+      return route;
     }
   }
   return accountRoute(llm, signal);
 }
 
+function nextModelEvent(iterator, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return iterator.next();
+    }).then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
 
 export async function complete(llm, route, system, data, maxTokens, signal) {
   signal.throwIfAborted();
@@ -61,6 +84,8 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
   const blocks = new Map();
   let size = 0;
   let finished = false;
+  let exhausted = false;
+  let iterator;
   const setBlock = (index, value) => {
     size += value.length - (blocks.get(index)?.length ?? 0);
     if (size > MAX_MODEL_OUTPUT) throw new ReaderError('模型输出过长。请重试当前操作。', 502, 'OUTPUT_LIMIT');
@@ -75,10 +100,16 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
       signal: active,
       messages: [{ role: 'user', content: [{ type: 'text', text: JSON.stringify(data) }] }],
     });
-    for await (const event of stream) {
+    iterator = stream[Symbol.asyncIterator]?.() ?? stream[Symbol.iterator]();
+    while (!exhausted) {
+      const { value: event, done } = await nextModelEvent(iterator, active);
       active.throwIfAborted();
+      if (done) {
+        exhausted = true;
+        break;
+      }
       if (event.type === 'tool-call-delta' || event.block?.type === 'tool-call') {
-        throw new ReaderError('模型返回了工具调用。请重试当前操作。', 502);
+        throw new ReaderError('模型返回了工具调用。请重试当前操作。', 502, 'UNEXPECTED_TOOL');
       }
       if (event.type === 'text-delta') {
         setBlock(event.index, (blocks.get(event.index) ?? '') + event.text);
@@ -110,6 +141,9 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
     }
     throw new ReaderError(active.aborted ? '模型请求已停止或超时。' : 'DeepSeek 账号模型暂时不可用。', 502,
       active.aborted ? 'ABORTED' : 'NETWORK');
+  } finally {
+    // Some adapters leave next() or return() pending even after cancellation.
+    if (iterator && !exhausted) void Promise.resolve().then(() => iterator.return?.()).catch(() => {});
   }
 }
 
@@ -162,7 +196,8 @@ export function selectEvidence(paper, translations, question, page, selectedId) 
   const excerpts = [];
   let chars = 0;
   for (const { paragraph } of ranked) {
-    if (excerpts.length >= 8 || chars + paragraph.text.length > 10_000) break;
+    if (excerpts.length >= 8) break;
+    if (chars + paragraph.text.length > 10_000) continue;
     excerpts.push({ id: paragraph.id, page: paragraph.page, text: paragraph.text });
     chars += paragraph.text.length;
   }

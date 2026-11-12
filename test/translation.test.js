@@ -75,17 +75,19 @@ test('清楚可判为简体中文的原段落原样保留，繁体和中英混�
     { ...paragraph(1), text: '这篇论文介绍了图像重建方法。' },
     { ...paragraph(2), text: '這篇論文介紹了圖像重建方法。' },
     { ...paragraph(3), text: '图像重建 Reconstruction produces a clearer image.' },
+    { ...paragraph(4), text: '这段文字含有統計資料。' },
   ] };
   await translateDocument({
     document, translations, signal: new AbortController().signal, save: async () => {},
     async request(_system, data, _maxTokens, { phase }) {
       assert.equal(phase, 'initial');
-      assert.deepEqual(data.paragraphs.map(p => p.id), [2, 3]);
-      return { text: '{"2":"这篇论文介绍了图像重建方法。","3":"图像重建得到更清晰的图像。"}', finished: true };
+      assert.deepEqual(data.paragraphs.map(p => p.id), [2, 3, 4]);
+      return { text: '{"2":"这篇论文介绍了图像重建方法。","3":"图像重建得到更清晰的图像。","4":"这段文字含有统计资料。"}', finished: true };
     },
   });
   assert.equal(translations[1], document.paragraphs[0].text);
-  assert.equal(Object.keys(translations).length, 3);
+  assert.equal(translations[4], '这段文字含有统计资料。');
+  assert.equal(Object.keys(translations).length, 4);
 });
 
 test('多批漏项合并补译，只重发未保存的段落', async () => {
@@ -107,8 +109,8 @@ test('多批漏项合并补译，只重发未保存的段落', async () => {
   assert.equal(Object.keys(translations).length, 28);
 });
 
-test('连续空回复和超长回复只标记失败段落，后续批次仍能完成', async () => {
-  for (const code of ['NO_CONTENT', 'OUTPUT_LIMIT']) {
+test('连续空回复、超长回复和意外工具调用只标记失败段落', async () => {
+  for (const code of ['NO_CONTENT', 'OUTPUT_LIMIT', 'UNEXPECTED_TOOL']) {
     const translations = {};
     let calls = 0;
     const failures = await translateDocument({
@@ -150,7 +152,7 @@ test('公式密集段落复用公式上下文相同的片段，拼回后全部�
 });
 
 test('不同变量之间的短片段在补译预算内合并发送', async () => {
-  const item = { ...paragraph(1), text: Array.from({ length: 30 }, (_, i) => `Estimate x_${i} and y_${i}.`).join(' ') };
+  const item = { ...paragraph(1), text: Array.from({ length: 70 }, (_, i) => `Estimate x_${i} and y_${i}.`).join(' ') };
   const translations = {};
   const parts = { Estimate: '估计', and: '和', '. Estimate': '。估计' };
   let fragmentCalls = 0;
@@ -164,7 +166,7 @@ test('不同变量之间的短片段在补译预算内合并发送', async () =>
   });
   assert.deepEqual(failures, []);
   assert.ok(fragmentCalls > 0 && fragmentCalls <= 3);
-  assert.match(translations[1], /x_29 和 y_29/);
+  assert.match(translations[1], /x_69 和 y_69/);
   assert.equal(validateTranslation(item, translations[1]).text, translations[1]);
 });
 

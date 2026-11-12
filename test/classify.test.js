@@ -4,6 +4,13 @@ import { classifyParagraphs, isTranslatable, looksLikeMath } from '../src/classi
 
 const paragraph = (id, page, box, text) => ({ id, page, box, text });
 
+test('简短中文正文不会仅因没有英文字母被判成公式', () => {
+  assert.equal(looksLikeMath('本文提出方法'), false);
+  assert.deepEqual(classifyParagraphs([
+    paragraph(1, 2, [.1, .2, .45, .23], '本文提出方法'),
+  ]), ['text']);
+});
+
 test('分类：正文与图表注释翻译，页眉、公式、参考文献与图例跳过', () => {
   const paragraphs = [
     paragraph(1, 1, [0.2, 0.1, 0.8, 0.14], 'Self-diffusion for Solving Inverse Problems'),

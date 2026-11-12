@@ -1,24 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, unlink, writeFile, readdir } from 'node:fs/promises';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   routeFor, complete, ReaderError, QUESTION_PROMPT, selectEvidence, validateTranslation,
 } from './model.js';
 import { classifyParagraphs, isTranslatable } from './classify.js';
 import { createRequestQueue, translateDocument } from './translation.js';
+import { createWorkspaceLibrary } from './workspace.js';
 
 export const name = 'dsh-quiet-reader';
 export const inject = ['connection', 'llm', 'workspaceRegistry'];
 const ROUTE = '/api/dsh-quiet-reader';
 const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
-const ID = /^[a-f0-9]{64}$/;
 const require = createRequire(import.meta.url);
-const LAYOUT_VERSION = 11;
+const LAYOUT_VERSION = 12;
 
 function validBox(box) {
   return Array.isArray(box) && box.length === 4
@@ -136,7 +135,7 @@ function validateDocument(input) {
   const layoutVersion = input.layoutVersion === LAYOUT_VERSION ? LAYOUT_VERSION : 0;
   const regions = Array.isArray(input.regions) ? input.regions.slice(0, 10_000).filter(region =>
     region && Number.isInteger(region.page) && region.page >= 1 && region.page <= total
-    && ['figure', 'table'].includes(region.kind) && validBox(region.box))
+    && ['figure', 'table', 'formula'].includes(region.kind) && validBox(region.box))
     .map(({ page, kind, box }) => ({ page, kind, box })) : [];
   return { title: title || '未命名论文', pages, paragraphs, regions, layoutVersion, ...(range ? { range } : {}) };
 }
@@ -311,11 +310,26 @@ export function createReader(ctx, root) {
   const enqueueModel = createRequestQueue(2);
 
   const settingsPath = join(dirname(root), 'settings.json');
+  const library = createWorkspaceLibrary(ctx.workspaceRegistry, join(dirname(root), 'workspace.json'), {
+    readJson, saveJson, maxPdfBytes: PDF_LIMIT,
+    onChange(previous) {
+      const reason = new ReaderError('阅藏工作区已变更，操作已停止。', 409, 'WORKSPACE_CHANGED');
+      for (const [key, job] of jobs) {
+        if (job.scope !== previous) continue;
+        job.controller.abort(reason);
+        void job.task.catch(() => {}).then(() => { if (jobs.get(key) === job) jobs.delete(key); });
+      }
+      for (const question of questions.values()) {
+        if (question.scope === previous) question.controller.abort(reason);
+      }
+    },
+  });
+  const paperKey = (scope, id) => JSON.stringify([scope.id, id]);
   let catalogue = { at: 0, value: null };
 
   async function readSettings() {
-    const stored = await readJson(settingsPath, {});
-    return stored && typeof stored === 'object' ? stored : {};
+    const { provider, model, reasoningEffort, translationMode } = await readJson(settingsPath, {}) ?? {};
+    return { provider, model, reasoningEffort, translationMode };
   }
 
   // The catalogue is read from Harness on demand, so models added by a future
@@ -362,65 +376,48 @@ export function createReader(ctx, root) {
     if (mutations.has(id)) throw new ReaderError('正在清除或删除这篇文献，请稍后重试。', 409);
   }
 
-  async function mutatePaper(id, action) {
-    assertIdle(id);
-    if (imports.has(id)) throw new ReaderError('正在导入这篇文献，请稍后重试。', 409);
-    mutations.add(id);
+  async function mutatePaper(scope, id, action, { removeHistory = false } = {}) {
+    const key = paperKey(scope, id);
+    assertIdle(key);
+    if (imports.has(key)) throw new ReaderError('正在导入这篇文献，请稍后重试。', 409);
+    mutations.add(key);
     try {
-      await Promise.allSettled([starting.get(id)]);
-      const document = await paper(id);
-      const job = jobs.get(id);
-      const question = questions.get(id);
+      await Promise.allSettled([starting.get(key)]);
+      const paper = await library.find(scope, id);
+      const job = jobs.get(key);
+      const question = removeHistory ? questions.get(key) : undefined;
       const reason = new ReaderError('文献已清除或删除，本次请求已停止。', 409);
       job?.controller.abort(reason);
       question?.controller.abort(reason);
       // Any disk write that started before cancellation must finish before this
       // mutation removes its result.
       await Promise.allSettled([job?.task, question?.task]);
-      jobs.delete(id);
-      return await action(document);
+      jobs.delete(key);
+      return await action(paper);
     } finally {
-      mutations.delete(id);
+      mutations.delete(key);
     }
   }
 
-  const storageFile = join(root, 'storages.json');
-  let storages;
-  const storageMap = () => {
-    if (storages) return storages;
-    try { storages = JSON.parse(readFileSync(storageFile, 'utf8')) ?? {}; } catch { storages = {}; }
-    return storages;
-  };
-  const saveStorageMap = () => {
-    try { writeFileSync(storageFile, JSON.stringify(storageMap())); } catch {}
-  };
+  const documentFor = paper => ({ ...withKinds(paper.document), workspaceId: paper.scope.id });
 
-  function directory(id) {
-    if (!ID.test(id ?? '')) throw new ReaderError('文献编号无效。');
-    return storageMap()[id] ?? join(root, id);
-  }
-
-  async function paper(id) {
-    const stored = await readJson(join(directory(id), 'paper.json'), null);
-    if (!stored) throw new ReaderError('找不到该文献。', 404);
-    return withKinds(stored);
-  }
-
-  async function detail(id) {
-    const document = activeDocument(await paper(id));
-    const translations = await readJson(join(directory(id), 'translations.json'), {});
+  async function detail(scope, id, paper) {
+    paper ??= await library.find(scope, id);
+    const document = activeDocument(documentFor(paper));
+    const translations = await library.read(paper, 'translations.json', {});
     // Stored answers that carry replacement characters or look truncated are not
     // shown; dropping them here makes the paper look unfinished so they get
     // translated again.
     pruneTranslations(translations);
     pruneSuspicious(document, translations);
-    const history = await readJson(join(directory(id), 'history.json'), []);
+    const history = await library.read(paper, 'history.json', []);
     const translatable = document.paragraphs.filter(paragraph => isTranslatable(paragraph.kind));
     const translatedCount = translatable.filter(paragraph => Object.hasOwn(translations, paragraph.id)).length;
     const activeTranslations = Object.fromEntries(translatable
       .filter(paragraph => Object.hasOwn(translations, paragraph.id))
       .map(paragraph => [paragraph.id, translations[paragraph.id]]));
-    const job = jobs.get(id);
+    const current = jobs.get(paperKey(scope, id));
+    const job = current?.scope === scope ? current : undefined;
     return {
       ...document, translations: activeTranslations, history, translated: translatedCount, expected: translatable.length,
       status: translatable.length === translatedCount ? 'complete' : job?.status === 'complete' ? 'pending' : job?.status ?? 'pending',
@@ -429,27 +426,28 @@ export function createReader(ctx, root) {
     };
   }
 
-  function startTranslation(document) {
-    document = activeDocument(document);
+  function startTranslation(paper) {
+    const document = activeDocument(documentFor(paper));
     const id = document.id;
-    assertIdle(id);
-    if (jobs.get(id)?.status === 'running') return;
+    const key = paperKey(paper.scope, id);
+    assertIdle(key);
+    if (jobs.get(key)?.status === 'running') return;
     const controller = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, controller.signal]);
-    const job = { status: 'running', error: '', controller, stats: { requests: 0, repairs: 0, inputChars: 0, outputChars: 0 } };
-    jobs.set(id, job);
+    const job = { scope: paper.scope, status: 'running', error: '', controller, stats: { requests: 0, repairs: 0, inputChars: 0, outputChars: 0 } };
+    jobs.set(key, job);
     job.task = (async () => {
       try {
-        const path = join(directory(id), 'translations.json');
-        const translations = await readJson(path, {});
+        const translations = await library.read(paper, 'translations.json', {});
         signal.throwIfAborted();
         const droppedEmpty = pruneTranslations(translations);
         const droppedSuspicious = pruneSuspicious(document, translations);
-        if (droppedEmpty || droppedSuspicious) await saveJson(path, translations);
+        if (droppedEmpty || droppedSuspicious) await library.save(paper, 'translations.json', translations);
         if (!document.paragraphs.some(p => isTranslatable(p.kind) && !Object.hasOwn(translations, p.id))) return;
         let routeTask;
         const request = async (system, data, maxTokens, { phase = 'initial' } = {}) => {
           const run = () => modelTask(async () => {
+            await library.assertActive(paper.scope);
             routeTask ??= readSettings().then(settings => routeFor(ctx.llm, settings, signal, { translation: true }));
             const route = await waitForTask(routeTask, signal);
             signal.throwIfAborted();
@@ -469,7 +467,7 @@ export function createReader(ctx, root) {
         };
         job.failures = await translateDocument({
           document, translations, request, signal,
-          save: () => saveJson(path, translations),
+          save: () => library.save(paper, 'translations.json', translations),
         });
         if (job.failures.length) {
           job.status = 'error';
@@ -483,9 +481,9 @@ export function createReader(ctx, root) {
         job.status = 'error';
         job.error = error instanceof ReaderError ? error.message : '全文翻译暂停。请检查账号或本地文件后继续。';
       } finally {
-        if (jobs.get(id) === job) {
+        if (jobs.get(key) === job) {
           if (signal.aborted) {
-            if (lifetime.signal.aborted) jobs.delete(id);
+            if (lifetime.signal.aborted) jobs.delete(key);
             else { job.status = 'pending'; job.error = ''; }
           }
           else if (job.status === 'running') job.status = 'complete';
@@ -494,28 +492,30 @@ export function createReader(ctx, root) {
     })();
   }
 
-  function prepareTranslation(id) {
-    assertIdle(id);
-    if (!starting.has(id)) {
-      const task = paper(id).then(startTranslation).finally(() => starting.delete(id));
-      starting.set(id, task);
+  function prepareTranslation(scope, id) {
+    const key = paperKey(scope, id);
+    assertIdle(key);
+    if (!starting.has(key)) {
+      const task = library.find(scope, id).then(startTranslation).finally(() => starting.delete(key));
+      starting.set(key, task);
     }
-    return starting.get(id);
+    return starting.get(key);
   }
 
-  async function pauseTranslation(id) {
-    assertIdle(id);
-    await paper(id);
-    await starting.get(id);
-    const job = jobs.get(id);
+  async function pauseTranslation(scope, id) {
+    const key = paperKey(scope, id);
+    assertIdle(key);
+    await library.find(scope, id);
+    await starting.get(key);
+    const job = jobs.get(key);
     if (job?.status === 'running') {
       job.controller.abort(new ReaderError('翻译已暂停，已完成的译文已保留。', 409));
       await job.task;
     }
-    return detail(id);
+    return detail(scope, id);
   }
 
-  async function importPaper(request) {
+  async function importPaper(scope, request) {
     const bytes = await boundedBody(request, PDF_LIMIT + 5 * 1024 * 1024);
     let form;
     try {
@@ -536,61 +536,44 @@ export function createReader(ctx, root) {
     try { input = JSON.parse(documentJson); } catch { throw new ReaderError('解析后的文献数据无效。'); }
     const parsed = validateDocument(input);
     const id = createHash('sha256').update(pdf).digest('hex');
-    assertIdle(id);
-    const previous = imports.get(id);
+    const key = paperKey(scope, id);
+    assertIdle(key);
+    const previous = imports.get(key);
     const task = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {
-      let path = directory(id);
-      const folder = typeof form.get('folder') === 'string' ? form.get('folder').trim() : '';
-      let workspaceId = '';
-      if (!storageMap()[id] && folder) {
-        const safe = String(parsed.title || '论文').replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').trim().slice(0, 60) || '文献';
-        path = join(folder, safe);
-        await mkdir(path, { recursive: true });
-        storageMap()[id] = path;
-        saveStorageMap();
-        const settings = await readSettings();
-        const live = await ctx.workspaceRegistry.list().catch(() => []);
-        const existing = live.find(item => String(item.id) === String(settings.libraryWorkspace));
-        await saveJson(settingsPath, { ...settings, libraryRoot: folder });
-        workspaceId = existing ? String(existing.id) : '';
+      const existing = await library.find(scope, id, true);
+      const stored = existing?.document;
+      const paper = existing ?? await library.reserve(scope, parsed.title, id);
+      const document = { ...withKinds(mergeImport(stored, parsed)), id, workspaceId: scope.id };
+      try {
+        if (!stored) await library.writePdf(paper, pdf);
+        await library.save(paper, 'paper.json', document);
+      } catch (error) {
+        if (!stored) await library.discard(paper).catch(() => {});
+        throw error;
       }
-      await mkdir(path, { recursive: true });
-      const manifest = join(path, 'paper.json');
-      const stored = await readJson(manifest, null);
-      if (!stored) await writeFile(join(path, 'original.pdf'), pdf);
-      const workspace = workspaceId
-        ? { id: workspaceId }
-        : await ctx.workspaceRegistry.create(folder || path, stored?.title ?? parsed.title);
-      if (!workspaceId) {
-        const settings = await readSettings();
-        await saveJson(settingsPath, {
-          ...settings,
-          ...(folder ? { libraryRoot: folder } : {}),
-          libraryWorkspace: String(workspace.id),
-        });
-      }
-      const document = { ...withKinds(mergeImport(stored, parsed)), id, workspaceId: String(workspace.id) };
-      await saveJson(manifest, document);
+      const current = { ...paper, document };
       // Reopening an imported paper shows its existing progress. Resume is explicit.
-      if (!stored) startTranslation(document);
-      return detail(id);
+      if (!stored) startTranslation(current);
+      return detail(scope, id, current);
     });
-    imports.set(id, task);
-    try { return await task; } finally { if (imports.get(id) === task) imports.delete(id); }
+    imports.set(key, task);
+    try { return await task; } finally { if (imports.get(key) === task) imports.delete(key); }
   }
 
-  function ask(id, input) {
+  function ask(scope, id, input) {
     const question = typeof input.question === 'string' ? input.question.trim() : '';
     if (!question || question.length > 1000) throw new ReaderError('请输入 1 至 1000 字的问题。');
-    assertIdle(id);
-    if (questions.has(id)) throw new ReaderError('本篇文献还有一个问题正在回答。', 409);
+    const key = paperKey(scope, id);
+    assertIdle(key);
+    if (questions.has(key)) throw new ReaderError('本篇文献还有一个问题正在回答。', 409);
     const controller = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, controller.signal]);
-    const job = { controller };
-    questions.set(id, job);
+    const job = { scope, controller };
+    questions.set(key, job);
     job.task = (async () => {
       try {
-        const document = await detail(id);
+        const paper = await library.find(scope, id);
+        const document = await detail(scope, id, paper);
         signal.throwIfAborted();
         const selected = document.paragraphs.find(p => p.id === input.selectedId);
         const page = selected?.page ?? (Number.isInteger(input.page) ? input.page : 1);
@@ -599,46 +582,22 @@ export function createReader(ctx, root) {
           question: turn.question.slice(0, 400), answer: turn.answer.slice(0, 750),
         }));
         const route = await waitForTask(routeFor(ctx.llm, await readSettings(), signal), signal);
-        const reply = await modelTask(() => complete(ctx.llm, route, QUESTION_PROMPT, {
-          title: document.title, question, history, excerpts,
-        }, 1400, signal), signal);
+        const reply = await modelTask(async () => {
+          await library.assertActive(scope);
+          return complete(ctx.llm, route, QUESTION_PROMPT, { title: document.title, question, history, excerpts }, 1400, signal);
+        }, signal);
         signal.throwIfAborted();
         if (!reply.finished) throw new ReaderError('回答未完整生成。请重试当前问题。', 502);
         const answer = reply.text;
         const turn = { question, answer, references: excerpts.map(({ id, page }) => ({ id, page })) };
         const updated = [...document.history, turn].slice(-40);
-        await saveJson(join(directory(id), 'history.json'), updated);
+        await library.save(paper, 'history.json', updated);
         return updated;
       } finally {
-        if (questions.get(id) === job) questions.delete(id);
+        if (questions.get(key) === job) questions.delete(key);
       }
     })();
     return job.task;
-  }
-
-  async function list() {
-    const entries = await readdir(root, { withFileTypes: true }).catch(error => {
-      if (error.code === 'ENOENT') return [];
-      throw error;
-    });
-    let live = null;
-    try {
-      const items = await ctx.workspaceRegistry.list();
-      if (Array.isArray(items) && items.length) live = new Set(items.map(item => String(item.id)));
-    } catch {}
-    const alive = value => !live || !value.workspaceId || live.has(String(value.workspaceId));
-    const result = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !ID.test(entry.name)) continue;
-      const value = await readJson(join(root, entry.name, 'paper.json'), null);
-      if (value && !alive(value)) {
-        await rm(join(root, entry.name), { recursive: true, force: true }).catch(() => {});
-        continue;
-      }
-      if (!value) continue;
-      result.push({ id: value.id, title: value.title, workspaceId: value.workspaceId });
-    }
-    return result.sort((a, b) => a.title.localeCompare(b.title, 'zh'));
   }
 
   async function asset(name) {
@@ -677,9 +636,14 @@ export function createReader(ctx, root) {
       const { searchParams } = new URL(request.url);
       const action = searchParams.get('action');
       const id = searchParams.get('id');
+      const workspaceId = searchParams.get('workspaceId');
       if (request.method === 'GET') {
-        if (action === 'list') return json(await list());
-        if (action === 'detail') return json(await detail(id));
+        if (action === 'workspace') return json({ workspace: library.describe(await library.status()) });
+        if (action === 'list') {
+          const selected = await library.status();
+          return json(selected ? await library.list(await library.required(workspaceId)) : []);
+        }
+        if (action === 'detail') return json(await detail(await library.required(workspaceId), id));
         if (action === 'asset') return await asset(searchParams.get('name') ?? '');
         if (action === 'settings') {
           return json({ current: await readSettings(), providers: await modelCatalogue() });
@@ -696,14 +660,20 @@ export function createReader(ctx, root) {
           }
         }
         if (action === 'pdf') {
-          await paper(id);
-          return new Response(await readFile(join(directory(id), 'original.pdf')), {
+          const scope = await library.required(workspaceId);
+          return new Response(await library.readPdf(await library.find(scope, id)), {
             headers: { 'content-type': 'application/pdf', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
           });
         }
       }
       if (request.method === 'POST') {
-        if (action === 'import') return json(await importPaper(request), 201);
+        if (action === 'workspace') {
+          let input;
+          try { input = JSON.parse(await boundedBody(request, 16_384)); }
+          catch { throw new ReaderError('工作区选择格式无效。'); }
+          return json({ workspace: library.describe(await library.select(input?.folder)) });
+        }
+        if (action === 'import') return json(await importPaper(await library.required(workspaceId), request), 201);
         if (action === 'settings') {
           let input;
           try { input = JSON.parse(await boundedBody(request, 4096)); } catch { throw new ReaderError('模型设置格式无效。'); }
@@ -721,43 +691,44 @@ export function createReader(ctx, root) {
           const wanted = typeof input?.reasoningEffort === 'string' ? input.reasoningEffort : '';
           if (wanted && efforts.some(effort => effort.id === wanted)) settings.reasoningEffort = wanted;
           else if (efforts.some(effort => effort.id === 'off')) settings.reasoningEffort = 'off';
+          await mkdir(dirname(settingsPath), { recursive: true });
           await saveJson(settingsPath, settings);
           return json({ current: settings, providers });
         }
         if (action === 'translate') {
-          await prepareTranslation(id);
-          return json(await detail(id), 202);
+          const scope = await library.required(workspaceId);
+          await prepareTranslation(scope, id);
+          return json(await detail(scope, id), 202);
         }
-        if (action === 'pause') return json(await pauseTranslation(id));
+        if (action === 'pause') return json(await pauseTranslation(await library.required(workspaceId), id));
         if (action === 'reset') {
-          return json(await mutatePaper(id, async document => {
-            await rm(join(directory(id), 'translations.json'), { force: true });
-            await rm(join(directory(id), 'history.json'), { force: true });
-            return detail(document.id);
+          const scope = await library.required(workspaceId);
+          return json(await mutatePaper(scope, id, async paper => {
+            await library.clearTranslations(paper);
+            return detail(scope, id, paper);
           }));
         }
         if (action === 'delete') {
-          return json(await mutatePaper(id, async document => {
-            try {
-              if (document.workspaceId) await (ctx.workspaceRegistry.deleteKnown ?? ctx.workspaceRegistry.delete)?.call(ctx.workspaceRegistry, document.workspaceId);
-            } catch {
-              throw new ReaderError('工作区删除失败，文献文件已保留。请重试。', 502);
-            }
-            await rm(directory(id), { recursive: true, force: true });
-            delete storageMap()[id]; saveStorageMap();
-            return { deleted: document.id };
-          }));
+          const scope = await library.required(workspaceId);
+          return json(await mutatePaper(scope, id, async paper => {
+            await library.remove(paper);
+            return { deleted: id };
+          }, { removeHistory: true }));
         }
         if (action === 'ask') {
+          const scope = await library.required(workspaceId);
           let input;
           try { input = JSON.parse(await boundedBody(request, 8192)); } catch { throw new ReaderError('问题请求格式无效。'); }
-          return json(await ask(id, input ?? {}));
+          return json(await ask(scope, id, input ?? {}));
         }
       }
       throw new ReaderError('阅读操作不存在。', 404);
     } catch (error) {
       const status = error instanceof ReaderError ? error.status : 500;
-      return json({ error: status === 500 ? '阅读服务暂时不可用。请检查本地存储或 Harness 账号。' : error.message }, status);
+      return json({
+        error: status === 500 ? '阅读服务暂时不可用。请检查本地存储或 Harness 账号。' : error.message,
+        ...(error instanceof ReaderError && error.code ? { code: error.code } : {}),
+      }, status);
     }
   }
   return { fetch, dispose: () => lifetime.abort() };
