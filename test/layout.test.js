@@ -35,6 +35,20 @@ function page(items, operators = []) {
   };
 }
 
+test('连续公式行合并成一个公式块', async () => {
+  const items = [
+    run('L(θ)', 90, 120, 40, 'math'),
+    run('= E', 134, 120, 26, 'math'),
+    run('q', 160, 120, 6, 'math'),
+    run('[log p(x|z)]', 90, 132, 70, 'math'),
+    run('+ KL', 90, 144, 34, 'math'),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
+  assert.equal(paragraphs.length, 1);
+  assert.equal(paragraphs[0].lines.length, 1);
+  assert.match(paragraphs[0].text, /log p\(x\|z\)/);
+});
+
 test('同一基线的断行碎片会合并成一个段落', async () => {
   const items = [
     run('achieve state-of-the-art perfor-', 100, 100, 180),

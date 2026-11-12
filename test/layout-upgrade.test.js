@@ -54,8 +54,8 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   }
 
   const newBox = [.14, .21, .86, .26];
-  const upgradedFirst = await upload(4, paragraph(1, 1, first, newBox));
-  assert.equal(upgradedFirst.layoutVersion, 4);
+  const upgradedFirst = await upload(5, paragraph(1, 1, first, newBox));
+  assert.equal(upgradedFirst.layoutVersion, 5);
   assert.deepEqual(upgradedFirst.layoutPages, [1]);
   assert.deepEqual(upgradedFirst.translations, { 1: translations[1] });
   assert.deepEqual(upgradedFirst.paragraphs[0].box, newBox);
@@ -63,12 +63,12 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   assert.equal(partial.paragraphs.find(p => p.id === 2).text, previousSecond);
 
   const legacyThird = await upload(2, paragraph(1, 3, 'The third page is newly imported from the old client.'));
-  assert.equal(legacyThird.layoutVersion, 4);
+  assert.equal(legacyThird.layoutVersion, 5);
   assert.deepEqual(legacyThird.layoutPages, [1]);
   assert.deepEqual(legacyThird.paragraphs.map(p => p.id), [3]);
 
-  const upgradedSecond = await upload(4, paragraph(1, 2, revisedSecond));
-  assert.equal(upgradedSecond.layoutVersion, 4);
+  const upgradedSecond = await upload(5, paragraph(1, 2, revisedSecond));
+  assert.equal(upgradedSecond.layoutVersion, 5);
   assert.deepEqual(upgradedSecond.layoutPages, [1, 2]);
   assert.deepEqual(upgradedSecond.paragraphs.map(p => [p.id, p.text]), [[4, revisedSecond]]);
   assert.deepEqual(upgradedSecond.translations, {});

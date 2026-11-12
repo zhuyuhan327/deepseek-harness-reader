@@ -616,6 +616,50 @@ function assembleParagraphs(lines, viewport, number, normalize) {
   });
 }
 
+function formulaLine(line) {
+  if (line.region || line.equationProse || !line.mathSpans?.length) return false;
+  const words = (line.text.match(/[A-Za-z]{2,}/g) ?? []).length;
+  return line.mathRatio >= .62 || (words <= 3 && line.mathRatio >= .34);
+}
+
+function mergeFormulaLine(left, right, typical) {
+  const gap = right.baseline - left.baseline;
+  if (gap <= 0 || gap > typical * 2.6) return false;
+  if (Math.abs(left.size - right.size) > Math.max(left.size, right.size) * .25) return false;
+  const shared = Math.min(left.box[2], right.box[2]) - Math.max(left.box[0], right.box[0]);
+  return shared > Math.min(width(left.box), width(right.box)) * .45;
+}
+
+function appendFormula(left, right) {
+  const glue = /[=+−\-×÷/([{$]$/u.test(left.text) ? '' : ' ';
+  const offset = left.text.length + glue.length;
+  left.text += glue + right.text;
+  left.box = union(left.box, right.box);
+  for (const span of right.mathSpans) {
+    left.mathSpans.push({ start: span.start + offset, end: span.end + offset, box: span.box });
+  }
+  left.mathRatio = left.mathSpans.reduce((count, span) => count + span.end - span.start, 0) / Math.max(1, left.text.length);
+  left.runs = left.runs && right.runs ? [...left.runs, ...right.runs] : undefined;
+}
+
+/**
+ * A displayed formula spread over several baselines is extracted as one math
+ * line per baseline. Join them into a single block so it becomes one protected
+ * formula region instead of several paragraph fragments.
+ */
+function mergeFormulaLines(lines, typical) {
+  const result = [];
+  for (const line of lines) {
+    const previous = result.at(-1);
+    if (previous && formulaLine(previous) && formulaLine(line) && mergeFormulaLine(previous, line, typical)) {
+      appendFormula(previous, line);
+    } else {
+      result.push(line);
+    }
+  }
+  return result;
+}
+
 function crossesGutter(line, gutter, typical) {
   return gutter !== null && line.box[0] < gutter - typical * .55 && line.box[2] > gutter + typical * .55;
 }
@@ -696,7 +740,8 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   const joined = rejoinJustifiedRows(validRows, gutter, regions);
   const merged = mergeBaselineFragments(joined, gutter, typical);
   const ordered = orderLines(merged, gutter, viewport.width, typical, number);
-  const separated = splitEquationProse(ordered);
+  const formulas = mergeFormulaLines(ordered, typical);
+  const separated = splitEquationProse(formulas);
   const paragraphs = assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }
