@@ -596,7 +596,7 @@ function joinLines(previous, line, block) {
   // the end of the preceding sentence, then wrap to the left column margin.
   const wrapsFromRight = block.length === 1 && !previous.bold && dx <= -size * 2.3
     && (previous.equationProse || (/^[A-Z]/.test(previous.text)
-      && previous.text.split(/\s+/).length <= 3 && width(previous.box) < size * 8))
+      && previous.text.split(/\s+/).length <= 8 && width(previous.box) < size * 14))
     && !/[.!?;:]$/.test(previous.text) && /^[a-z]{2}/.test(line.text)
     && Math.abs(previous.box[2] - line.box[2]) <= size * .35 && width(previous.box) < width(line.box) * .75;
   return !line.region && !previous.region && !line.runInHeading && !previous.runInHeading

@@ -200,12 +200,12 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   };
   const first = await upload(1);
   const saved = await host.until(first.id, 'complete');
-  const reanalyzed = await upload(1, 12);
+  const reanalyzed = await upload(1, 13);
   assert.deepEqual(reanalyzed.layoutPages, [1]);
   assert.deepEqual(reanalyzed.translations, saved.translations);
   assert.deepEqual(reanalyzed.regions.map(region => region.kind), ['formula']);
 
-  const second = await upload(2, 12);
+  const second = await upload(2, 13);
   assert.equal(second.id, first.id);
   assert.equal(second.workspaceId, first.workspaceId);
   assert.deepEqual(second.range, { first: 2, last: 2 });
@@ -214,7 +214,7 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   await host.request('translate', second.id, {});
   assert.equal((await host.until(second.id, 'complete')).translated, 1);
 
-  const reopened = await upload(1, 12);
+  const reopened = await upload(1, 13);
   assert.deepEqual(reopened.translations, saved.translations);
   assert.equal(host.calls.length, 2);
 });

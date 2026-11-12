@@ -135,13 +135,13 @@ test('先选工作区再导入及打开文献，文献请求携带工作区编�
     if (action === 'import') {
       assert.equal(options.body.get('pdf').name, 'fixture.pdf');
       const parsed = JSON.parse(options.body.get('document'));
-      assert.equal(parsed.layoutVersion, 12);
+      assert.equal(parsed.layoutVersion, 13);
       assert.deepEqual(parsed.range, { first: 1, last: 1 });
     } else {
       assert.equal(action, 'detail');
       assert.equal(params.get('id'), id);
     }
-    return Response.json({ id, workspaceId: workspace.id, title: 'Fixture paper', layoutVersion: 12, layoutPages: [1],
+    return Response.json({ id, workspaceId: workspace.id, title: 'Fixture paper', layoutVersion: 13, layoutPages: [1],
       pages: [{ width: 612, height: 792 }], paragraphs: [], history: [], translations: {}, status: 'complete', translated: 0, expected: 0 });
   };
   await import('../src/client.js?workspace-contract');
