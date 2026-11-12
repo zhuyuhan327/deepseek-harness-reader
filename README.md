@@ -1,6 +1,6 @@
 # 阅藏 · DeepSeek Harness 阅读插件
 
-[![test](https://github.com/zhuyuhan327/deepseek-harness-reader/actions/workflows/test.yml/badge.svg)](https://github.com/zhuyuhan327/deepseek-harness-reader/actions/workflows/test.yml)
+[![test](https://github.com/zhuyuhan327/dsh-translation-reader/actions/workflows/test.yml/badge.svg)](https://github.com/zhuyuhan327/dsh-translation-reader/actions/workflows/test.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 打开侧栏的「阅读模式」后，必须先选择工作区文件夹。该文件夹登记为 Harness 的根工作区，每篇上传的文字型 PDF 存入其中独立的文献子目录，并在主面板打开双语阅读。上传时启动全文翻译，阅读页会随着进度逐段显示译文。
@@ -30,7 +30,7 @@
 
 ### 方式一：下载 Release（推荐）
 
-从 [Releases](https://github.com/zhuyuhan327/deepseek-harness-reader/releases/latest) 下载 `dsh-quiet-reader-<version>.tgz`，然后执行：
+从 [Releases](https://github.com/zhuyuhan327/dsh-translation-reader/releases/latest) 下载 `dsh-quiet-reader-<version>.tgz`，然后执行：
 
 ```powershell
 dsh plugin --profile desktop add ./dsh-quiet-reader-<version>.tgz

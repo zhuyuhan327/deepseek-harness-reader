@@ -1,6 +1,6 @@
 {
   "name": "dsh-quiet-reader",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "阅藏：DeepSeek Harness 的双语论文阅读模式",
   "type": "module",
   "main": "./src/host.js",
@@ -17,11 +17,11 @@
   "author": "zhuyuhan327",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zhuyuhan327/deepseek-harness-reader.git"
+    "url": "git+https://github.com/zhuyuhan327/dsh-translation-reader.git"
   },
-  "homepage": "https://github.com/zhuyuhan327/deepseek-harness-reader#readme",
+  "homepage": "https://github.com/zhuyuhan327/dsh-translation-reader#readme",
   "bugs": {
-    "url": "https://github.com/zhuyuhan327/deepseek-harness-reader/issues"
+    "url": "https://github.com/zhuyuhan327/dsh-translation-reader/issues"
   },
   "dependencies": { "pdfjs-dist": "5.6.205" },
   "dsh": {
