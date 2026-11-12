@@ -302,7 +302,15 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
       return;
     }
     if (!readable(text)) return;
-    if (paragraph === title || paragraph === appendixTitle || (!PROSE_START.test(text) && headingCandidate(text))
+    const headingStyle = paragraph.style;
+    const biggerThanBody = base > 0 && Number(headingStyle?.size) >= base * 1.15;
+    // A section heading can share its line with the following body sentence
+    // ("4.1 Implementation Details Datasets for ..."). Only bold, larger, or
+    // short candidates keep the heading kind; otherwise the line stays body.
+    const runInBody = text.length > 70 && /[.!?]\s+\S/u.test(text);
+    const headingLike = !PROSE_START.test(text) && headingCandidate(text) && !runInBody
+      && (Boolean(headingStyle?.bold) || biggerThanBody || text.length <= 60);
+    if (paragraph === title || paragraph === appendixTitle || headingLike
         || runInHeading(paragraph, text, paragraphs[index + 1], onPage)) {
       kinds[index] = KIND_HEADING;
       return;
@@ -311,7 +319,8 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
     if (style && text.length <= 160 && base > 0 && !PROSE_START.test(text) && !/[.!?。！？]$/.test(text)) {
       const bigger = Number(style.size) >= base * 1.18;
       const boldHead = Boolean(style.bold) && Number(style.size) >= base * 0.98;
-      if (bigger || boldHead) {
+      const runInBody = text.length > 70 && /[.!?]\s+\S/u.test(text);
+      if ((bigger || boldHead) && !runInBody) {
         kinds[index] = KIND_HEADING;
         return;
       }

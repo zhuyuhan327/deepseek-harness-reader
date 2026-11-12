@@ -45,8 +45,12 @@ export function expectedOverlays(paragraphs, translations) {
 }
 
 export function pageOverlays(paragraphs, translations, regions) {
-  const protectedBoxes = protectedAreas(paragraphs, regions, translations);
-  return expectedOverlays(paragraphs, translations).filter(p => !covered(sourceBoxes(p), protectedBoxes));
+  // Only figure and table regions hide a translation here. Formula blocks are
+  // avoided during placement, so a text line that overlaps an equation still
+  // gets its translation instead of disappearing from the exported PDF.
+  const regionBoxes = regions.map(region => region.box);
+  return expectedOverlays(paragraphs, translations)
+    .filter(p => !covered(sourceBoxes(p), regionBoxes));
 }
 
 function protectedAreas(paragraphs, regions, translations) {

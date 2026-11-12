@@ -198,3 +198,13 @@ test('会议页脚与出版信息不会被翻译', () => {
   ];
   assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'text']);
 });
+
+test('与正文同行的标题不会吞掉后面的正文', () => {
+  const paragraphs = [
+    paragraph(1, 4, [0.52, 0.69, 0.91, 0.72], '4.1 Implementation Details Datasets for Synthetic Experiments. We use the Kodak24 dataset.'),
+    { ...paragraph(2, 4, [0.52, 0.69, 0.91, 0.72], '4.1 Implementation Details Datasets for Synthetic Experiments. We use the Kodak24 dataset.'),
+      style: { bold: true, size: 10.9 } },
+    paragraph(3, 4, [0.52, 0.14, 0.84, 0.15], '3.3 Gap Refinement Denoising Network'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'text', 'heading']);
+});

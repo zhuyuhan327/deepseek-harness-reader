@@ -141,3 +141,13 @@ test('图形遮挡的图注仍需报告未排版，重叠的同文副本只计�
   assert.deepEqual(expectedOverlays(paragraphs, translations).map(p => p.id), [1, 3]);
   assert.deepEqual(pageOverlays(paragraphs, translations, regions).map(p => p.id), [3]);
 });
+
+test('与公式重叠的正文仍会输出译文，不再从导出中消失', () => {
+  const { canvas } = recordingCanvas();
+  const page = { width: 200, height: 200 };
+  const text = { id: 1, kind: 'text', text: 'where x is the value', box: [0.1, 0.1, 0.6, 0.2], style: { size: 10 } };
+  const formula = { id: 2, kind: 'formula', text: 'L = a + b', box: [0.12, 0.11, 0.58, 0.19] };
+  const lines = paintTranslation(canvas, page, page, [text, formula], { 1: '其中 x 是该值' });
+  assert.equal(lines.length > 0, true);
+  assert.equal(lines[0].paragraphId, 1);
+});
