@@ -378,6 +378,12 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       const [left, top, right, bottom] = pixels(lineBox, width, height);
       ctx.fillRect(left - maskPadX, top - maskPadTop, right - left + maskPadX * 2, bottom - top + maskPadTop + maskPadBottom);
     }
+    // Even when the translation had to move to a fallback frame, the source
+    // block itself must be cleared so its English never shows through.
+    {
+      const [left, top, right, bottom] = pixels(paragraph.box, width, height);
+      ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
+    }
     if (frame) {
       const [left, top, right, bottom] = pixels(frame, width, height);
       ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
