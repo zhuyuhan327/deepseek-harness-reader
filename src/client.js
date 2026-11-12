@@ -351,6 +351,12 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       let selectedPaper = '';
+      // Cordis requires an explicit injection before a service can be read.
+      let pickDirectory = null;
+      ctx.inject(['uiWorkspace'], scoped => {
+        pickDirectory = () => scoped.uiWorkspace.pickDirectory();
+        return () => { pickDirectory = null; };
+      });
       const listeners = new Set();
       const refresh = signal => request('list', {}, undefined, signal);
       const choosePaper = id => {
@@ -382,7 +388,7 @@ window.__ModuleLoader__.load({
         });
         const chooseFolder = async () => {
           try {
-            const picked = await ctx.uiWorkspace?.pickDirectory?.();
+            const picked = await pickDirectory?.();
             if (!picked) return;
             setSaveFolder(picked);
             try { localStorage.setItem('dsh-quiet-reader:folder', picked); } catch {}
