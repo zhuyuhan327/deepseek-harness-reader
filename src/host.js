@@ -142,7 +142,7 @@ function validateDocument(input) {
 
 // Older manifests are classified when read and saved in the current schema
 // on reimport. Reads never replace the manifest of a concurrent import.
-const SCHEMA = 6;
+const SCHEMA = 7;
 
 function withKinds(document) {
   const needs = document.schema !== SCHEMA || document.paragraphs.some(paragraph => paragraph.kind === undefined);

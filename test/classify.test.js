@@ -190,3 +190,11 @@ test('纯符号与公式碎片不会被当作正文翻译', () => {
   ];
   assert.deepEqual(classifyParagraphs(paragraphs), ['formula', 'text']);
 });
+
+test('会议页脚与出版信息不会被翻译', () => {
+  const paragraphs = [
+    paragraph(1, 1, [0.18, 0.93, 0.63, 0.94], '36th Conference on Neural Information Processing Systems (NeurIPS 2022).'),
+    paragraph(2, 1, [0.18, 0.9, 0.83, 0.92], 'We conclude the section with the main results of the experiment.'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'text']);
+});

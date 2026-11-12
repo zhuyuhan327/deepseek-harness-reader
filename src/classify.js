@@ -280,6 +280,9 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
     const width = right - left;
     const height = bottom - top;
     if (EMAIL.test(text) || REFERENCE_ENTRY.test(text) || ALGORITHM.test(text)) return;
+    // Publication footers (conference/proceedings lines) are page furniture, not body text.
+    if (marginSide(paragraph.box) === 'bottom' && text.length <= 140
+        && /(proceedings of|conference on|neurips|icml|iclr|cvpr|iccv|eccv|copyright|©|arxiv:|preprint)/i.test(text)) return;
     if ((top < 0.035 || bottom > 0.965) && text.length < 120) return;
     if (repeatedMarginText(paragraph, text, marginText.get(normalize(text)))) return;
     if (isCaption(text)) {
