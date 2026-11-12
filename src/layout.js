@@ -602,7 +602,9 @@ function joinLines(previous, line, block) {
   return !line.region && !previous.region && !line.runInHeading && !previous.runInHeading
     && line.mathRatio < .62 && previous.mathRatio < .62 && dy > size * .52 && dy < size * 1.61
     && ((dx > -size * 2.3 && dx < indent) || wrapsFromRight)
-    && sameTextStyle(previous, line)
+    && (sameTextStyle(previous, line)
+      || (/\p{Letter}-$/u.test(previous.text) && /^\p{Ll}/u.test(line.text)
+        && Math.abs(previous.size - line.size) < .5))
     && shared > Math.min(width(line.box), width(previous.box)) * .52
     && !CAPTION.test(line.text) && !NEW_BLOCK.test(line.text)
     && !(shortLine && /[.!?。！？]$/.test(previous.text));
@@ -724,8 +726,10 @@ function mergeFragments(left, right, gutter, typical) {
   if (!cells && Math.abs(left.size - right.size) > Math.max(left.size, right.size) * .2) return false;
   if (CAPTION.test(right.text)) return false;
   // A finished sentence followed by a capitalised new block is a real break,
-  // even when the two boxes sit close together on one baseline.
-  if (gap > typical * .5 && /[.!?]["'”’)]?$/u.test(left.text) && /^[A-Z0-9]/u.test(right.text)) return false;
+  // even when the two boxes sit close together on one baseline. A bold run-in
+  // heading is the typical case; regular body text may still continue.
+  if (gap > typical * .5 && (left.bold || right.bold)
+      && /[.!?]["'”’)]?$/u.test(left.text) && /^[A-Z0-9]/u.test(right.text)) return false;
   const mathLeft = (left.mathRatio ?? 0) > .5;
   const mathRight = (right.mathRatio ?? 0) > .5;
   // Formula cells ("1", "n", "i=1", "Σ") are separate one-glyph lines; join them
