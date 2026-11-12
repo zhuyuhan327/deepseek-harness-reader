@@ -778,6 +778,66 @@ function mergeBaselineFragments(lines, gutter, typical) {
   return result;
 }
 
+function mathShare(paragraph) {
+  const covered = (paragraph.mathSpans ?? []).reduce((total, span) => total + (span.end - span.start), 0);
+  return covered / Math.max(1, paragraph.text.length);
+}
+
+function symbolParagraph(paragraph) {
+  return mathShare(paragraph) > .5 || !/[A-Za-z]{3,}/u.test(paragraph.text);
+}
+
+/**
+ * Adjacent formula fragments that failed the line-level merge (different
+ * baselines, side-by-side cells) still form one displayed equation. Join them
+ * into a single block so the overlay treats the equation as one region.
+ */
+function mergeAdjacentFormulas(paragraphs, typical, viewport) {
+  const members = paragraphs.map((paragraph, index) => ({ paragraph, index })).filter(({ paragraph }) => symbolParagraph(paragraph));
+  if (members.length < 3) return paragraphs;
+  const clusters = [];
+  for (const member of members) {
+    const near = clusters.find(cluster => cluster.some(other => {
+      const a = other.paragraph.box;
+      const b = member.paragraph.box;
+      const vertical = (Math.max(a[1], b[1]) - Math.min(a[3], b[3])) * viewport.height;
+      const side = (Math.max(a[0], b[0]) - Math.min(a[2], b[2])) * viewport.width;
+      return vertical <= typical * 2.5 && side <= typical * 2.5;
+    }));
+    if (near) near.push(member);
+    else clusters.push([member]);
+  }
+  const merged = new Map();
+  for (const cluster of clusters) {
+    if (cluster.length < 3) continue;
+    const total = cluster.reduce((sum, member) => sum + member.paragraph.text.length, 0);
+    const width = (Math.max(...cluster.map(({ paragraph }) => paragraph.box[2])) - Math.min(...cluster.map(({ paragraph }) => paragraph.box[0]))) * viewport.width;
+    if (width < typical * 4 || total > 260) continue;
+    cluster.sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1] || a.paragraph.box[0] - b.paragraph.box[0]);
+    const [target] = cluster;
+    let text = target.paragraph.text;
+    let box = target.paragraph.box;
+    let spans = [...(target.paragraph.mathSpans ?? [])];
+    let lines = [...(target.paragraph.lines ?? [])];
+    for (const member of cluster.slice(1)) {
+      const offset = text.length + 1;
+      text += ` ${member.paragraph.text}`;
+      box = union(box, member.paragraph.box);
+      lines = [...lines, ...(member.paragraph.lines ?? [])];
+      for (const span of member.paragraph.mathSpans ?? []) {
+        spans.push({ ...span, start: span.start + offset, end: span.end + offset });
+      }
+      merged.set(member.index, target.index);
+    }
+    target.paragraph.text = text;
+    target.paragraph.box = box;
+    target.paragraph.lines = lines;
+    if (spans.length) target.paragraph.mathSpans = spans;
+  }
+  if (!merged.size) return paragraphs;
+  return paragraphs.filter((_, index) => !merged.has(index));
+}
+
 export async function extractPageLayout(pdfjs, page, viewport, number) {
   const [content, operators] = await Promise.all([
     page.getTextContent(),
@@ -822,6 +882,6 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   const ordered = orderLines(merged, gutter, viewport.width, typical, number);
   const formulas = mergeFormulaLines(ordered, typical);
   const separated = splitEquationProse(formulas);
-  const paragraphs = assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize);
+  const paragraphs = mergeAdjacentFormulas(assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize), typical, viewport);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }
