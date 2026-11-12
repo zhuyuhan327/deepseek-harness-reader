@@ -123,15 +123,15 @@ test('版面数据异常的段落不会中断整页绘制', () => {
   assert.ok(events.some(event => event.type === 'text' && event.text === '正常'));
 });
 
-test('放不下的译文保留原文并由预检报告，不生成无效坐标或裁剪掉正文', () => {
+test('极窄区域改用更大的空白框和更小字号排版，坐标有效', () => {
   const { canvas, events } = recordingCanvas();
   const page = { width: 200, height: 200 };
   const paragraph = { id: 1, kind: 'text', text: 'An extremely narrow region', box: [.1, .1, .18, .13],
     style: { size: 5.5 } };
   const lines = paintTranslation(canvas, page, page, [paragraph], { 1: '这是一段需要完整保存的译文'.repeat(3) });
-  assert.deepEqual(lines, []);
-  assert.equal(events.filter(event => event.type === 'mask').length, 0);
-  assert.equal(events.filter(event => event.type === 'text').length, 0);
+  assert.ok(lines.length > 0);
+  assert.ok(lines.every(line => Number.isFinite(line.x) && Number.isFinite(line.y) && line.size >= 4 && line.size <= 10));
+  assert.ok(events.some(event => event.type === 'text'));
 });
 
 test('图形遮挡的图注仍需报告未排版，重叠的同文副本只计一次', () => {

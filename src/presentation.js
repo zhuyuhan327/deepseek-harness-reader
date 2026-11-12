@@ -188,7 +188,7 @@ function pixels([l, t, r, b], width, height) {
   return [l * width, t * height, r * width, b * height];
 }
 
-function fit(ctx, units, paragraph, width, height, bodySize) {
+function fit(ctx, units, paragraph, width, height, bodySize, minimumSize = 5.5) {
   const [left, top, right, bottom] = pixels(paragraph.box, width, height);
   const w = right - left;
   const h = bottom - top;
@@ -228,7 +228,7 @@ function fit(ctx, units, paragraph, width, height, bodySize) {
     return null;
   };
   let best = layoutAt(sizeLimit);
-  const minimum = Math.min(sizeLimit, 5.5);
+  const minimum = Math.min(sizeLimit, minimumSize);
   for (let size = Math.floor((sizeLimit - .001) * 2) / 2; !best && size >= minimum; size -= .5) best = layoutAt(size);
   if (!best) return null;
   const align = heading && ['center', 'right'].includes(style.align) ? style.align : 'left';
@@ -283,6 +283,26 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
   }
   // Incomplete or overflowing text must fail export preflight. Clipping a
   // partial translation and reporting it as painted silently loses content.
+  // Some blocks are narrower than their Chinese text at the readable minimum.
+  // Try a much larger free rectangle (column width, several lines tall) and a
+  // smaller floor before giving up, so the translation still lands on the page.
+  if (!best) {
+    const [l, t, r, b] = paragraph.box;
+    const roomy = [l, t, Math.min(.985, Math.max(r, .9)),
+      Math.min(.985, Math.max(b + bodySize * 10 / height, b + .06))];
+    const attempt = (box, minimumSize) => {
+      const layout = fit(ctx, units, { ...paragraph, box }, width, height, bodySize, minimumSize);
+      if (!layout) return null;
+      const lines = placedLines(layout, width, height);
+      return lines.some(line => obstacles.some(obstacle => overlap(line.box, obstacle) > 1e-10))
+        ? null : { layout, lines, frame: box };
+    };
+    best = attempt(roomy, 4.5);
+    for (const box of availableBoxes(roomy, obstacles)) {
+      const candidate = attempt(box, 4.5);
+      if (candidate && (!best || candidate.layout.size > best.layout.size)) best = candidate;
+    }
+  }
   return best;
 }
 
@@ -323,7 +343,7 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   const maskPadX = .62;
   const maskPadTop = .86;
   const maskPadBottom = .70;
-  for (const { paragraph } of placements) {
+  for (const { paragraph, frame } of placements) {
     const [l, t, r, b] = paragraph.box;
     const padded = [l - maskPadX / width, t - maskPadTop / height, r + maskPadX / width, b + maskPadBottom / height];
     ctx.save();
@@ -338,6 +358,10 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     for (const lineBox of sourceBoxes(paragraph)) {
       const [left, top, right, bottom] = pixels(lineBox, width, height);
       ctx.fillRect(left - maskPadX, top - maskPadTop, right - left + maskPadX * 2, bottom - top + maskPadTop + maskPadBottom);
+    }
+    if (frame) {
+      const [left, top, right, bottom] = pixels(frame, width, height);
+      ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
     }
     ctx.restore();
   }
