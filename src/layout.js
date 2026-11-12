@@ -847,6 +847,29 @@ function mergeAdjacentFormulas(paragraphs, typical, viewport, gutter) {
   return paragraphs.filter((_, index) => !merged.has(index));
 }
 
+
+function mathBands(lines, viewport, typical) {
+  const candidates = lines
+    .filter(line => !line.region && (line.mathRatio ?? 0) >= .55
+      && line.text.replace(/\s+/gu, '').length >= 2)
+    .sort((a, b) => a.baseline - b.baseline);
+  const bands = [];
+  for (const line of candidates) {
+    const band = bands.at(-1);
+    const gap = band ? line.baseline - band.bottom : Infinity;
+    const shared = band ? Math.min(line.box[2], band.box[2]) - Math.max(line.box[0], band.box[0]) : 0;
+    if (band && gap <= typical * 2.4 && gap >= -typical * 1.5 && shared > -typical * 2) {
+      band.count++;
+      band.bottom = Math.max(band.bottom, line.baseline);
+      band.box = union(band.box, line.box);
+    } else {
+      bands.push({ count: 1, bottom: line.baseline, box: line.box });
+    }
+  }
+  return bands
+    .filter(band => band.count >= 3 && height(band.box) >= typical * 2)
+    .map(band => ({ kind: 'formula', box: band.box }));
+}
 export async function extractPageLayout(pdfjs, page, viewport, number) {
   const [content, operators] = await Promise.all([
     page.getTextContent(),
@@ -870,6 +893,9 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
     // whole label is covered and no overlay is painted on top of it.
     region.box = union(region.box, line.box);
   }
+  // Protect displayed-equation bands from text overlays without changing how
+  // their lines are assembled into paragraphs.
+  regions.push(...mathBands(lines, viewport, typical));
   // Chart labels (axis names, legends) often sit a few points outside the
   // vector artwork. Absorb short lines that clearly belong to the figure so
   // they are not translated as body paragraphs.
