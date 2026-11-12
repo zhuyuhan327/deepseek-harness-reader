@@ -695,6 +695,18 @@ function mergeFormulaLines(lines, typical) {
   return result;
 }
 
+function formulaCell(line) {
+  const text = line.text.replace(/\s+/gu, '');
+  if (!text || text.length > 8) return false;
+  if ((line.mathRatio ?? 0) > .4) return true;
+  // Formula cells often use the text font, so fall back to composition: a short
+  // run of digits/letters/operators with no sentence punctuation is a cell.
+  if (!/[\p{L}\p{N}]/u.test(text)) return false;
+  if (text.length <= 2) return true;
+  if (/[，。！？、；：]/u.test(text)) return false;
+  return /[=+\-−×÷/()\[\]{}|<>≤≥^_∑∏∫√∞]/u.test(text);
+}
+
 function crossesGutter(line, gutter, typical) {
   return gutter !== null && line.box[0] < gutter - typical * .55 && line.box[2] > gutter + typical * .55;
 }
@@ -704,8 +716,12 @@ function mergeFragments(left, right, gutter, typical) {
   if (crossesGutter(left, gutter, typical) || crossesGutter(right, gutter, typical)) return false;
   if (gutter !== null && (center(left.box) < gutter) !== (center(right.box) < gutter)) return false;
   const gap = right.box[0] - left.box[2];
-  if (gap > typical * 2.6 || gap < -typical * .8) return false;
-  if (Math.abs(left.size - right.size) > Math.max(left.size, right.size) * .2) return false;
+  const cells = formulaCell(left) && formulaCell(right);
+  if (gap > typical * 2.6) return false;
+  // Stacked formula rows may start at the same x, so their gap is negative.
+  if (gap < -typical * .8 && !cells) return false;
+  // Formula cells carry sub/superscripts of other sizes; prose must match.
+  if (!cells && Math.abs(left.size - right.size) > Math.max(left.size, right.size) * .2) return false;
   if (CAPTION.test(right.text)) return false;
   // A finished sentence followed by a capitalised new block is a real break,
   // even when the two boxes sit close together on one baseline.
@@ -715,9 +731,10 @@ function mergeFragments(left, right, gutter, typical) {
   // Formula cells ("1", "n", "i=1", "Σ") are separate one-glyph lines; join them
   // back into the single equation they came from.
   if (mathLeft && mathRight) return gap <= typical * 3.2;
+  if (cells) return gap <= typical * 3.2;
   // Only formula fragments may bridge a small baseline offset (scripts and
   // numerator/denominator rows); ordinary prose needs the same baseline.
-  if (Math.abs(right.baseline - left.baseline) > typical * .45 && !(mathLeft || mathRight)) return false;
+  if (Math.abs(right.baseline - left.baseline) > typical * .45 && !(mathLeft && mathRight)) return false;
   return /[A-Za-z]{2}/u.test(left.text) || /[A-Za-z]{2}/u.test(right.text);
 }
 
@@ -754,7 +771,7 @@ function mergeBaselineFragments(lines, gutter, typical) {
     row = [];
   };
   for (const line of sorted) {
-    if (row.length && Math.abs(line.baseline - row[0].baseline) > typical * .8) flush();
+    if (row.length && Math.abs(line.baseline - row[0].baseline) > typical) flush();
     row.push(line);
   }
   flush();
