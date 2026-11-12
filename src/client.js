@@ -696,6 +696,15 @@ window.__ModuleLoader__.load({
         const untranslated = (paper?.paragraphs ?? []).filter(p =>
           [undefined, 'text', 'heading', 'caption'].includes(p.kind) && !paper.translations[p.id]?.trim());
         const untranslatedPages = [...new Set(untranslated.map(p => p.page))];
+        // Old imports predate the current layout rules. Re-run layout once per
+        // paper so users never test a stale extraction without knowing it.
+        const autoLayout = useRef('');
+        useEffect(() => {
+          if (!paper || !needsLayout || busy || paper.status === 'running') return;
+          if (autoLayout.current === paper.id) return;
+          autoLayout.current = paper.id;
+          void refreshLayout();
+        }, [paper?.id, needsLayout, busy]);
         useEffect(() => {
           if (!paper) return;
           const first = paper.range?.first ?? 1;
