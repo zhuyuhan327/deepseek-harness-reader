@@ -23,6 +23,32 @@ test('完整保留带小数点的章节编号，比较级中的冠词仍可翻�
   assert.deepEqual(protectMath('The parameter a >1000 is constrained.').tokens.map(token => token.value), ['a >1000']);
 });
 
+test('根据上下文保留变量 I、a 和 A，冠词与第一人称照常翻译', () => {
+  const paragraph = { id: 1, text: 'The identity matrix I and a scalar a are fixed. I report a result. We then use I and a to compute the output.' };
+  const prepared = protectMath(paragraph.text, [], paragraph.id);
+  assert.deepEqual(prepared.tokens.map(token => token.value), ['I', 'a', 'I', 'a']);
+  assert.match(prepared.text, /I report a result/);
+  assert.match(prepared.text, /and a scalar/);
+  assert.equal(validateTranslation(paragraph, prepared.text, prepared.tokens).text, paragraph.text);
+  assert.equal(validateTranslation(paragraph, '固定单位矩阵 I 和标量 a。我报告结果，再用 I 和 a 计算输出。').reason, undefined);
+  assert.equal(validateTranslation(paragraph, '固定单位矩阵 I 和 a scalar。我报告结果，再用 I 计算输出。').reason, 'math');
+  assert.equal(validateTranslation({ id: 1, text: 'The scalar a is fixed.' }, '我们固定 a scalar。').reason, 'math');
+  assert.deepEqual(protectMath('Set a variable name and let a parameter update. I set a goal.').tokens, []);
+  assert.deepEqual(protectMath('The matrix A is fixed. A >1000× speedup was achieved.').tokens.map(token => token.value), ['A', '>1000×']);
+  assert.deepEqual(protectMath('We use a and b to compute E[a].').tokens.map(token => token.value), ['a', 'b', 'E', 'a']);
+});
+
+test('公式变量的撇号、组合重音和上下标与字母一起保护', () => {
+  const paragraph = { id: 2, text: "Use x′, y', ᾱ, 𝑦̂, x¹⁄₂ and r̅ₜ with fθˆ(y), ‖z‖₂ and x->y." };
+  const prepared = protectMath(paragraph.text, [], paragraph.id);
+  assert.deepEqual(prepared.tokens.map(token => token.value), ["x′", "y'", 'ᾱ', '𝑦̂', 'x¹⁄₂', 'r̅ₜ', 'fθˆ(y)', '‖z‖₂', 'x->y']);
+  assert.equal(validateTranslation(paragraph, prepared.text, prepared.tokens).text, paragraph.text);
+  assert.equal(validateTranslation(paragraph, paragraph.text.replace('ᾱ', 'α')).reason, 'math');
+  assert.equal(validateTranslation({ id: 2, text: 'Use x with the result.' }, '在结果中使用 x′。').reason, 'math');
+  assert.deepEqual(protectMath('The approach(see other notes) works, e.g on p. 1.').tokens, []);
+  assert.deepEqual(protectMath('Use x-y or a-b; see Fig. A1.').tokens.map(token => token.value), ['x-y', 'a-b', 'A1']);
+});
+
 test('回填允许明确的等价标记拼写，并拒绝缺失、重复、换序和跨段标记', () => {
   const paragraph = { id: 3, text: 'The parameters σ and ϵ are used here [1].' };
   const { tokens } = protectMath(paragraph.text, [], paragraph.id);

@@ -17,7 +17,7 @@ const ROUTE = '/api/dsh-quiet-reader';
 const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
 const require = createRequire(import.meta.url);
-const LAYOUT_VERSION = 15;
+const LAYOUT_VERSION = 16;
 
 function validBox(box) {
   return Array.isArray(box) && box.length === 4
@@ -142,7 +142,7 @@ function validateDocument(input) {
 
 // Older manifests are classified when read and saved in the current schema
 // on reimport. Reads never replace the manifest of a concurrent import.
-const SCHEMA = 9;
+const SCHEMA = 10;
 
 function withKinds(document) {
   const needs = document.schema !== SCHEMA || document.paragraphs.some(paragraph => paragraph.kind === undefined);

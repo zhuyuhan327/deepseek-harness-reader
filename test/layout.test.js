@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { classifyParagraphs } from '../src/classify.js';
 import { extractPageLayout } from '../src/layout.js';
 
 const viewport = { width: 600, height: 800, scale: 1, transform: [1, 0, 0, -1, 0, 800] };
@@ -25,6 +26,7 @@ function page(items, operators = []) {
     ['regular', { name: 'ABCDEF+NimbusRomNo9L-Regu' }],
     ['bold', { name: 'ABCDEF+NimbusRomNo9L-Medi' }],
     ['math', { name: 'ABCDEF+CMMI10' }],
+    ['operator', { name: 'ABCDEF+CMEX10' }],
   ]);
   return {
     commonObjs: fonts,
@@ -61,6 +63,28 @@ test('图形附近的标题与短正文不会被扩大的图形区域吞掉', as
   assert.ok(paragraphs.every(p => p.box[1] > figure.box[3]));
 });
 
+test('图形区域不会越过图注吸收后续行的行内上标', async () => {
+  const operators = [[OPS.save], [OPS.transform, 180, 0, 0, 80, 100, 520],
+    [OPS.paintImageXObject, 'img', 180, 80], [OPS.restore]];
+  const items = [
+    run('Table 3. Analysis of patch sampling for', 60, 294, 236),
+    run('(i)', 234, 301, 10, 'math', 7),
+    run('different values for the operator ', 60, 308, 163),
+    run('R', 226, 308, 8, 'math'),
+    run('ρ', 234, 309, 4, 'math', 6),
+    run(' used in the model.', 246, 308, 80),
+  ];
+  const { paragraphs, regions } = await extractPageLayout(pdfjs, page(items, operators), viewport, 8);
+  assert.equal(paragraphs.length, 1);
+  const [caption] = paragraphs;
+  assert.match(caption.text, /^Table 3\. Analysis.*different values for the operator Rρ\(i\) used in the model\.$/);
+  assert.equal(caption.lines.length, 2);
+  const [span] = caption.mathSpans;
+  assert.equal(caption.text.slice(span.start, span.end), 'Rρ(i)');
+  assert.equal(span.box[2], 244 / viewport.width);
+  assert.ok(regions.find(r => r.kind === 'figure').box[3] < caption.box[1]);
+});
+
 test('双栏中靠近栏间的公式不会跨栏聚合', async () => {
   const items = [];
   for (const y of [80, 94, 108]) {
@@ -76,7 +100,7 @@ test('双栏中靠近栏间的公式不会跨栏聚合', async () => {
   assert.ok(left.box[2] < .5);
 });
 
-test('连续公式行合并成一个公式块', async () => {
+test('连续公式行合并成一个公式块并保留各行的坐标', async () => {
   const items = [
     run('L(θ)', 90, 120, 40, 'math'),
     run('= E', 134, 120, 26, 'math'),
@@ -86,8 +110,54 @@ test('连续公式行合并成一个公式块', async () => {
   ];
   const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
   assert.equal(paragraphs.length, 1);
-  assert.equal(paragraphs[0].lines.length, 1);
+  assert.equal(paragraphs[0].lines.length, 3);
+  assert.deepEqual(paragraphs[0].mathSpans.map(span => span.baseline), [120 / 800, 132 / 800, 144 / 800]);
   assert.match(paragraphs[0].text, /log p\(x\|z\)/);
+});
+
+test('有正文隔开的两个公式块各自保留边界', async () => {
+  const items = [
+    run('x = P(y) + z', 60, 100, 110, 'math'),
+    run('which extracts a patch from the source.', 60, 114, 205),
+    run('y = D(x) − z', 60, 128, 110, 'math'),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  assert.deepEqual(paragraphs.map(p => p.text), [
+    'x = P(y) + z', 'which extracts a patch from the source.', 'y = D(x) − z',
+  ]);
+  assert.ok(paragraphs[0].box[3] < paragraphs[1].box[1]);
+  assert.ok(paragraphs[1].box[3] < paragraphs[2].box[1]);
+});
+
+test('小字号下括号标签保留各自的边界', async () => {
+  const items = [
+    run('We introduce the restoration model in this section.', 60, 72, 215),
+    run('The method separates noise from each observed patch.', 60, 86, 218),
+    run('We denoise each patch with the equation below.', 60, 100, 210),
+    run('| {z }x ← D(x), |X − {{zx(i)}}, t). (7)', 60, 114, 210, 'math'),
+    run('denoised patch', 66, 124, 45, 'regular', 7),
+    run('patch to be denoised', 125, 124, 52, 'regular', 7),
+    run('all other noisy patches', 190, 124, 55, 'regular', 7),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  assert.deepEqual(paragraphs.filter(p => p.style.size === 7).map(p => p.text), [
+    'denoised patch', 'patch to be denoised', 'all other noisy patches',
+  ]);
+});
+
+test('多行公式的同行编号注释不会并入下一行正文', async () => {
+  const items = [
+    run('+ σ(t − 1) + c(t − 1)ϵt', 96, 640, 170, 'math'),
+    run('t ← t − 1', 87, 655, 40, 'math'),
+    run('(update timestep).', 198, 655, 72),
+    run('(6)', 283, 655, 12),
+    run('where c(t − 1) modifies the amount of sampling stochasticity.', 58, 675, 237),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  assert.deepEqual(classifyParagraphs(paragraphs), ['formula', 'formula', 'text']);
+  assert.equal(paragraphs[1].text, '(update timestep). (6)');
+  assert.match(paragraphs[2].text, /^where c\(t − 1\)/);
+  assert.ok(paragraphs[2].box[1] > paragraphs[1].box[3]);
 });
 
 test('同一基线的断行碎片会合并成一个段落', async () => {
@@ -201,6 +271,20 @@ test('A raised root joins its formula on the next baseline instead of overlappin
   assert.deepEqual(paragraphs[0].mathSpans.map(span => paragraphs[0].text.slice(span.start, span.end)), ['√1 − α']);
 });
 
+test('A displaced large operator stays with its equation when it overlaps a short word above', async () => {
+  const items = [
+    run('We center a mixture ', 60, 100, 102),
+    run('component ', 163, 100, 50),
+    run('at each patch:', 215, 100, 58),
+    run('P', 166, 105, 10, 'operator'),
+    run('p(x) =', 122, 112, 38, 'math'),
+    run('p(x; y)', 181, 112, 43, 'math'),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  assert.equal(paragraphs[0].text, 'We center a mixture component at each patch:');
+  assert.ok(paragraphs.slice(1).some(p => p.text.includes('P')));
+});
+
 test('A short prose continuation stays with its paragraph before raised formula scripts', async () => {
   const preceding = 'We weight the patches before they are reassembled into an';
   const items = [
@@ -240,6 +324,23 @@ test('An adjacent raised index becomes part of the same source crop as its varia
   assert.match(body.text, /noisy patch x\(i\)$/);
   assert.equal(body.text.slice(body.mathSpans[0].start, body.mathSpans[0].end), 'x(i)');
   assert.equal(body.mathSpans[0].box[2], 114 / viewport.width);
+});
+
+test('A raised index stays attached when a citation follows on the same baseline', async () => {
+  const items = [
+    run('The clean patch is estimated from a noisy', 60, 100, 220),
+    run('(i)', 102, 106.5, 12, 'math', 7),
+    run('patch ', 60, 113, 30),
+    run('x', 94, 113, 8, 'math'),
+    run('[74]. Further optimization is possible.', 118, 113, 164),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  assert.equal(paragraphs.length, 1);
+  const [body] = paragraphs;
+  assert.match(body.text, /patch x\(i\) \[74\]\. Further optimization/);
+  const [span] = body.mathSpans;
+  assert.equal(body.text.slice(span.start, span.end), 'x(i)');
+  assert.equal(span.box[2], 114 / viewport.width);
 });
 
 test('A prose clause after a displayed equation joins its wrapped continuation', async () => {
@@ -290,6 +391,28 @@ test('A clause after inline math stays in its existing prose paragraph', async (
   const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
   assert.equal(paragraphs.length, 1);
   assert.match(paragraphs[0].text, /^We model the input as X = P\(x\), where P\(i\) is a matrix/);
+});
+
+test('An arrow assignment after prose uses its original formula bounds', async () => {
+  const phrase = 'The output image is then assembled as';
+  const items = [
+    run(phrase, 60, 100, 153),
+    run('x', 215, 100, 6, 'math'),
+    run('←', 223, 100, 10, 'math'),
+    run('R', 236, 100, 8, 'math'),
+    run('(i)', 244, 94, 10, 'math', 7),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 3);
+  const prose = paragraphs.find(p => p.text === phrase);
+  const formula = paragraphs.find(p => p.text.includes('←'));
+  assert.ok(prose && formula);
+  assert.equal(prose.box[2], 213 / viewport.width);
+  assert.equal(formula.box[0], 215 / viewport.width);
+  assert.equal(prose.mathSpans, undefined);
+  const inlineItems = [...items.slice(0, -1), run('for each patch.', 247, 100, 70)];
+  const { paragraphs: inline } = await extractPageLayout(pdfjs, page(inlineItems), viewport, 3);
+  assert.equal(inline.length, 1);
+  assert.match(inline[0].text, /^The output image.*←.*for each patch\.$/);
 });
 
 test('PDF layout transforms and clips images inside nested form XObjects', async () => {

@@ -297,7 +297,7 @@ function makeRows(runs, typical) {
       const sameBaseline = delta <= run.size * .2;
       const nearText = row.runs.some(other => other.box[0] - run.box[2] <= row.size * .65
         && run.box[0] - other.box[2] <= row.size * .65);
-      const underProse = deferredOperator(run) && row.runs.some(other => !other.font.math && other.text.length > 12
+      const underProse = deferredOperator(run) && row.runs.some(other => !other.font.math && /[A-Za-z]{3}/.test(other.text)
         && other.box[0] < run.box[0] && other.box[2] > run.box[2]);
       if (!sameBaseline && (!nearText || underProse)) continue;
       distance = delta;
@@ -488,15 +488,36 @@ function rejoinJustifiedRows(rows, gutter, regions) {
   });
 }
 
+function equationClauseStart(line) {
+  return line.region ? -1 : (line.runs?.findIndex((run, i) => i >= 2 && !run.font.math
+    && !run.font.mathBase && /^[,.]\s+(?:where|as)\b/i.test(run.text)) ?? -1);
+}
+
+function trailingEquationStart(line) {
+  const runs = line.runs;
+  if (line.region || !runs) return -1;
+  // An assignment introduced at the end of a prose line is painted from the
+  // source together with its displaced scripts and summation limits.
+  const split = runs.findIndex((run, i) => i > 0 && (run.font.math || run.font.mathBase));
+  if (split < 1) return -1;
+  const prefix = runs.slice(0, split).map(run => run.text).join(' ');
+  if ((prefix.match(/[A-Za-z]{2,}/g)?.length ?? 0) < 4 || !/(?:\bas|:)$/i.test(prefix)) return -1;
+  const suffix = runs.slice(split);
+  if (!suffix.some(run => /^[←→↔↦]$/u.test(run.text))
+      || suffix.some(run => !run.font.math && !run.font.mathBase && /[A-Za-z]{3}/.test(run.text))) return -1;
+  return split;
+}
+
 function splitEquationProse(lines) {
   const tails = new Map();
   const result = [];
   for (const [index, line] of lines.entries()) {
     if (tails.has(index)) result.push(tails.get(index));
-    const split = line.region ? -1 : (line.runs?.findIndex((run, i) => i >= 2 && !run.font.math
-      && !run.font.mathBase && /^[,.]\s+(?:where|as)\b/i.test(run.text)) ?? -1);
+    const split = equationClauseStart(line);
     if (split < 0) {
-      result.push(line);
+      const trailing = trailingEquationStart(line);
+      if (trailing < 0) result.push(line);
+      else result.push(buildLine(line.runs.slice(0, trailing)), buildLine(line.runs.slice(trailing)));
       continue;
     }
     const formula = line.runs.slice(0, split);
@@ -531,23 +552,30 @@ function splitEquationProse(lines) {
   return result;
 }
 
-function attachTrailingIndices(lines) {
+function attachRaisedIndices(lines) {
   const ordered = [];
   for (const line of lines) {
     const script = ordered.at(-1);
-    const variable = line.mathSpans.at(-1);
-    if (!line.region && script && !script.region && script.mathSpans.length && line.mathSpans.length === 1
-        && variable && /^[a-z]{2,} [A-Za-z]$/.test(line.text)
-        && variable.start === line.text.length - 1 && variable.end === line.text.length
+    if (!line.region && script && !script.region && script.mathSpans.length && line.mathSpans.length
         && script.size < line.size * .84 && /^\([a-z0-9]{1,3}\)$/.test(script.text)
         && script.baseline < line.baseline && line.baseline - script.baseline < line.size * .82) {
-      const gap = script.box[0] - variable.box[2];
-      if (gap >= -line.size * .08 && gap <= line.size * .28) {
-        const text = line.text + script.text;
-        const span = { ...variable, end: text.length, box: union(variable.box, script.box) };
+      const base = line.runs?.find(run => {
+        if (!(run.font.math || run.font.mathBase) || !/^\p{Letter}$/u.test(run.text)
+            || Math.abs(run.baseline - line.baseline) > line.size * .2) return false;
+        const gap = script.box[0] - run.box[2];
+        return gap >= -line.size * .08 && gap <= line.size * .28;
+      });
+      const variable = base && line.mathSpans.find(span => span.box[0] <= base.box[0] && span.box[2] >= base.box[2]);
+      if (variable) {
+        const text = line.text.slice(0, variable.end) + script.text + line.text.slice(variable.end);
+        const mathSpans = line.mathSpans.map(span => {
+          if (span === variable) return { ...span, end: span.end + script.text.length, box: union(span.box, script.box) };
+          if (span.start < variable.end) return span;
+          return { ...span, start: span.start + script.text.length, end: span.end + script.text.length };
+        });
         ordered.pop();
-        ordered.push({ ...line, text, box: union(line.box, script.box), mathSpans: [span],
-          mathRatio: (span.end - span.start) / text.length });
+        ordered.push({ ...line, text, box: union(line.box, script.box), mathSpans, runs: undefined,
+          mathRatio: mathSpans.reduce((count, span) => count + span.end - span.start, 0) / text.length });
         continue;
       }
     }
@@ -639,12 +667,12 @@ function assembleParagraphs(lines, viewport, number, normalize) {
       const start = text.length;
       text += line.text;
       for (const span of line.mathSpans) mathSpans.push({
-        start: start + span.start, end: start + span.end, box: normalize(span.box),
-        baseline: line.baseline / viewport.height, size: line.size,
+          start: start + span.start, end: start + span.end, box: normalize(span.box),
+          baseline: (span.baseline ?? line.baseline) / viewport.height, size: span.size ?? line.size,
       });
     }
     const paragraph = {
-      page: number, text, box: normalize(box), lines: block.map(line => normalize(line.box)),
+      page: number, text, box: normalize(box), lines: block.flatMap(line => (line.sourceLines ?? [line.box]).map(normalize)),
       style: { size: first.size, bold: first.bold, italic: first.italic, fontFamily: first.fontFamily,
         align: centered ? 'center' : 'left', lineHeight },
     };
@@ -671,12 +699,14 @@ function appendFormula(left, right) {
   const glue = /[=+−\-×÷/([{$]$/u.test(left.text) ? '' : ' ';
   const offset = left.text.length + glue.length;
   left.text += glue + right.text;
+  left.sourceLines = [...(left.sourceLines ?? [left.box]), ...(right.sourceLines ?? [right.box])];
   left.box = union(left.box, right.box);
   for (const span of right.mathSpans) {
-    left.mathSpans.push({ start: span.start + offset, end: span.end + offset, box: span.box });
+    left.mathSpans.push({ ...span, start: span.start + offset, end: span.end + offset,
+      baseline: span.baseline ?? right.baseline, size: span.size ?? right.size });
   }
   left.mathRatio = left.mathSpans.reduce((count, span) => count + span.end - span.start, 0) / Math.max(1, left.text.length);
-  left.runs = left.runs && right.runs ? [...left.runs, ...right.runs] : undefined;
+  left.runs = undefined;
 }
 
 /**
@@ -714,7 +744,9 @@ function crossesGutter(line, gutter, typical) {
 }
 
 function mergeFragments(left, right, gutter, typical) {
-  if (left.region || right.region) return false;
+  if (left.region || right.region || left.runInHeading || right.runInHeading
+      || equationClauseStart(left) >= 0 || equationClauseStart(right) >= 0
+      || trailingEquationStart(left) >= 0 || trailingEquationStart(right) >= 0) return false;
   if (crossesGutter(left, gutter, typical) || crossesGutter(right, gutter, typical)) return false;
   if (gutter !== null && (center(left.box) < gutter) !== (center(right.box) < gutter)) return false;
   const gap = right.box[0] - left.box[2];
@@ -732,6 +764,9 @@ function mergeFragments(left, right, gutter, typical) {
       && /[.!?]["'”’)]?$/u.test(left.text) && /^[A-Z0-9]/u.test(right.text)) return false;
   const mathLeft = (left.mathRatio ?? 0) > .5;
   const mathRight = (right.mathRatio ?? 0) > .5;
+  // Preserve individual smaller labels under braces and other equation marks.
+  if (!cells && !mathLeft && !mathRight && (Math.max(left.size, right.size) < typical * .82
+      || !sameTextStyle(left, right))) return false;
   // Formula cells ("1", "n", "i=1", "Σ") are separate one-glyph lines; join them
   // back into the single equation they came from.
   if (mathLeft && mathRight) return gap <= typical * 3.2;
@@ -797,11 +832,15 @@ function symbolParagraph(paragraph) {
  * into a single block so the overlay treats the equation as one region.
  */
 function mergeAdjacentFormulas(paragraphs, typical, viewport, gutter) {
-  const members = paragraphs.map((paragraph, index) => ({ paragraph, index })).filter(({ paragraph }) => symbolParagraph(paragraph));
-  if (members.length < 3) return paragraphs;
   const clusters = [];
-  for (const member of members) {
-    const near = clusters.find(cluster => cluster.some(other => {
+  let cluster;
+  for (const [index, paragraph] of paragraphs.entries()) {
+    if (!symbolParagraph(paragraph)) {
+      cluster = undefined;
+      continue;
+    }
+    const member = { paragraph, index };
+    const near = cluster?.some(other => {
       const a = other.paragraph.box;
       const b = member.paragraph.box;
       const vertical = (Math.max(a[1], b[1]) - Math.min(a[3], b[3])) * viewport.height;
@@ -809,9 +848,12 @@ function mergeAdjacentFormulas(paragraphs, typical, viewport, gutter) {
       const sameColumn = gutter === null || ((a[0] + a[2]) * viewport.width / 2 < gutter)
         === ((b[0] + b[2]) * viewport.width / 2 < gutter);
       return sameColumn && vertical <= typical * 2.5 && side <= typical * 6;
-    }));
-    if (near) near.push(member);
-    else clusters.push([member]);
+    });
+    if (near) cluster.push(member);
+    else {
+      cluster = [member];
+      clusters.push(cluster);
+    }
   }
   const merged = new Map();
   for (const cluster of clusters) {
@@ -871,21 +913,30 @@ function mathBands(lines, viewport, typical) {
     .filter(band => band.count >= 3 && height(band.box) >= typical * 2)
     .map(band => ({ kind: 'formula', box: band.box }));
 }
-function mergeTextFragments(paragraphs, typical, viewport) {
+function mergeTextFragments(paragraphs, typical, viewport, gutter) {
   const result = [];
+  const dividing = gutter === null ? null : gutter / viewport.width;
+  const tolerance = typical / viewport.width * .55;
+  const column = box => dividing === null ? 0 : box[2] <= dividing + tolerance ? -1 : box[0] >= dividing - tolerance ? 1 : 0;
   for (const paragraph of paragraphs) {
     const previous = result.at(-1);
     const text = paragraph.text.trim();
     if (previous) {
       const previousText = previous.text.trim();
-      const gap = (paragraph.box[1] - previous.box[3]) * viewport.height;
-      const shared = Math.min(previous.box[2], paragraph.box[2]) - Math.max(previous.box[0], paragraph.box[0]);
-      const narrower = Math.min(previous.box[2] - previous.box[0], paragraph.box[2] - paragraph.box[0]);
-      const joins = shared > narrower * .5 && gap <= typical * 1.6 && gap >= -typical * 2
+      const last = previous.lines?.at(-1) ?? previous.box;
+      const first = paragraph.lines?.[0] ?? paragraph.box;
+      const gap = (first[1] - last[3]) * viewport.height;
+      const shared = Math.min(last[2], first[2]) - Math.max(last[0], first[0]);
+      const narrower = Math.min(width(last), width(first));
+      const sameColumn = dividing === null || (column(previous.box) !== 0 && column(previous.box) === column(paragraph.box));
+      const joins = sameColumn && !symbolParagraph(previous) && !symbolParagraph(paragraph)
+        && shared > narrower * .5 && gap <= typical * 1.6 && gap >= -typical * .45
         && /[A-Za-z]{3}/u.test(previousText) && /[A-Za-z]{3}/u.test(text)
         && !/[.!?:]$/.test(previousText) && /^[a-z,;)]/u.test(text)
+        && !/^\([^()]+\)[,.]? \([A-Z]?\d+(?:\.\d+)*\)$/.test(previousText)
         && !CAPTION.test(text) && !CAPTION.test(previousText)
         && !paragraph.style?.bold && !previous.style?.bold
+        && sameTextStyle(previous.style, paragraph.style)
         && previousText.length + text.length < 1200;
       if (joins) {
         const offset = previous.text.length + 1;
@@ -933,6 +984,7 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   // Chart labels (axis names, legends) often sit a few points outside the
   // vector artwork. Absorb short lines that clearly belong to the figure so
   // they are not translated as body paragraphs.
+  const captions = lines.filter(line => CAPTION.test(line.text));
   for (const region of regions) {
     if (region.kind !== 'figure') continue;
     // Measure every label against the original artwork. Growing the region
@@ -946,6 +998,13 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
       const near = line.box[1] <= artwork[3] + typical * 2.4 && line.box[3] >= artwork[1] - typical * 2.4;
       const shared = Math.min(line.box[2], artwork[2]) - Math.max(line.box[0], artwork[0]);
       if (!near || shared < width(line.box) * .5) continue;
+      // A caption between the artwork and a label ends the graphics area.
+      const beyondCaption = captions.some(({ box }) => {
+        const shared = Math.min(line.box[2], box[2]) - Math.max(line.box[0], box[0]);
+        return shared > width(line.box) * .5 && ((artwork[3] <= box[1] && box[1] < line.box[3])
+          || (artwork[1] >= box[3] && box[3] > line.box[1]));
+      });
+      if (beyondCaption) continue;
       line.region = region;
       region.box = union(region.box, line.box);
     }
@@ -953,11 +1012,12 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   markRunInHeadings(validRows);
   const gutter = findGutter(lines, viewport.width, typical);
   const joined = rejoinJustifiedRows(validRows, gutter, regions);
-  const merged = mergeBaselineFragments(joined, gutter, typical);
+  const indexed = attachRaisedIndices(orderLines(joined, gutter, viewport.width, typical, number));
+  const merged = mergeBaselineFragments(indexed, gutter, typical);
   const ordered = orderLines(merged, gutter, viewport.width, typical, number);
-  const formulas = mergeFormulaLines(ordered, typical);
-  const separated = splitEquationProse(formulas);
-  const formulasMerged = mergeAdjacentFormulas(assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize), typical, viewport, gutter);
-  const paragraphs = mergeTextFragments(formulasMerged, typical, viewport);
+  const separated = splitEquationProse(ordered);
+  const formulas = mergeFormulaLines(separated, typical);
+  const formulasMerged = mergeAdjacentFormulas(assembleParagraphs(orderInlineContinuations(formulas, gutter), viewport, number, normalize), typical, viewport, gutter);
+  const paragraphs = mergeTextFragments(formulasMerged, typical, viewport, gutter);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }

@@ -11,13 +11,15 @@ const MARKER_PARTS = /([MmＭｍ]+)\s*[:：]\s*([0-9０-９]+)\s*[:：]\s*([0-9�
 const MATH_LETTERS = String.raw`\p{Script=Greek}\u{1D400}-\u{1D7FF}ℂℋℎℓℒℕℙℚℝℤℵ`;
 const VARIABLE = String.raw`[A-Za-z${MATH_LETTERS}]`;
 const SCRIPT_CHARS = String.raw`¹²³\u1D2C-\u1D6A\u2070-\u209F`;
-const SCRIPT_CHAR = `[${SCRIPT_CHARS}]`;
-const INDEX = String.raw`(?:${SCRIPT_CHAR}|[_^](?:\{[^{}\r\n]{1,40}\}|[A-Za-z0-9\p{Script=Greek}]+))`;
-const FUNCTION = String.raw`${VARIABLE}[A-Za-z0-9_]{0,24}(?:${INDEX})*\((?:[^()\r\n]|\([^()\r\n]{0,40}\)){1,60}\)`;
+const MODIFIERS = String.raw`${SCRIPT_CHARS}\p{M}′″‴⁗ˆ˜`;
+const INDEX = String.raw`(?:[${MODIFIERS}]|'(?![A-Za-z])|(?<=[${SCRIPT_CHARS}])⁄(?=[${SCRIPT_CHARS}])|[_^](?:\{[^{}\r\n]{1,40}\}|[A-Za-z0-9${MATH_LETTERS}]+))`;
+const FUNCTION = String.raw`${VARIABLE}[A-Za-z0-9_${MATH_LETTERS}]{0,24}(?:${INDEX})*\((?:[^()\r\n]|\([^()\r\n]{0,40}\)){1,60}\)`;
 const ATOM = String.raw`(?:${FUNCTION}|${VARIABLE}\d*|[A-Z]{2,5}|[−+-]?\d+(?:\.\d+)?(?:[eE][−+-]?\d+)?)(?:${INDEX})*`;
 const LEFT_BOUNDARY = String.raw`(?<![A-Za-z0-9_\p{Script=Greek}])`;
 const RIGHT_BOUNDARY = String.raw`(?![A-Za-z0-9_\p{Script=Greek}])`;
-const OPERATOR = String.raw`(?:[<>!=]=|[=<>≤≥≈≠∼∝∈∉⊆⊂⊃⊇±×÷⋅*/+→↦−|]|(?<=\s)-(?=\s))`;
+const OPERATOR = String.raw`(?:[<>!=]=|=>|->|<-|[=<>≤≥≈≠∼∝∈∉⊆⊂⊃⊇±×÷⋅*/+→↦−|-])`;
+const AMBIGUOUS_LETTER = new RegExp(String.raw`${LEFT_BOUNDARY}[aAI]${RIGHT_BOUNDARY}`, 'gu');
+const AMBIGUOUS_VARIABLE = /^[aAI]$/;
 const INLINE_MATH = [
   MATH_MARKER,
   new RegExp(MARKER_OCCURRENCE, 'gu'),
@@ -25,11 +27,35 @@ const INLINE_MATH = [
   /\\\([^\r\n]{1,200}?\\\)/g,
   new RegExp(String.raw`\$${ATOM}(?:\s*${OPERATOR}\s*${ATOM})*\$`, 'gu'),
   new RegExp(String.raw`${LEFT_BOUNDARY}${ATOM}(?:[ \t]*${OPERATOR}[ \t]*${ATOM})+${RIGHT_BOUNDARY}`, 'gu'),
-  new RegExp(String.raw`${LEFT_BOUNDARY}(?:${FUNCTION}|${VARIABLE}\d*${INDEX}+|(?<!['’])[B-HJ-Zb-z]\d*)${RIGHT_BOUNDARY}`, 'gu'),
+  new RegExp(String.raw`${LEFT_BOUNDARY}(?:${FUNCTION}|(?<!['’])${VARIABLE}\d*${INDEX}+|(?<!['’])(?:[B-HJ-Zb-z]\d*|[aAI]\d+))${RIGHT_BOUNDARY}`, 'gu'),
   new RegExp(String.raw`${LEFT_BOUNDARY}[A-Za-z0-9_]*[${MATH_LETTERS}][A-Za-z0-9_${MATH_LETTERS}]*(?:${INDEX})*${RIGHT_BOUNDARY}`, 'gu'),
-  /(?<=\b(?:let|denote|matrix|variable|parameter|operator|set|vector)\s+)[aAI](?![A-Za-z0-9_])/gi,
-  new RegExp(String.raw`[${MATH_LETTERS}${SCRIPT_CHARS}∀∃¬∈∉⊂⊃⊆⊇≤≥≈≠∑∏∫√∞∂∇∥∪∩×÷±−→←↔⇒⇔]+`, 'gu'),
+  new RegExp(String.raw`(?:‖[^‖\r\n]{1,80}‖|⟨[^⟩\r\n]{1,80}⟩)(?:${INDEX})*`, 'gu'),
+  new RegExp(String.raw`[${MATH_LETTERS}${SCRIPT_CHARS}∀∃¬∈∉⊂⊃⊆⊇≤≥≈≠∑∏∫√∞∂∇∥‖∣∪∩×÷±−→←↔⇒⇔]+`, 'gu'),
 ];
+
+function comparisonArticle(source, start) {
+  const phrase = /^(a\s+)[<>≤≥]\s*\d+(?:\.\d+)?/i.exec(source.slice(start));
+  if (!phrase) return 0;
+  const before = source.slice(0, start);
+  const followsVerb = /\b(?:achieve[sd]?|provide[sd]?|show[sn]?|offer[sd]?|yield[sd]?)\s+$/i.test(before);
+  const startsSentence = !before.trim() || /[.!?]\s+$/.test(before);
+  const measurement = /^(?:[×%‰]|\s+(?:dB|ms|fps)\b)/.test(source.slice(start + phrase[0].length));
+  return followsVerb || (startsSentence && measurement) ? phrase[1].length : 0;
+}
+
+// A bare a/A or I is usually prose unless its position indicates a variable.
+function variableUse(source, start, end, declared = false) {
+  const before = source.slice(Math.max(0, start - 60), start);
+  const after = source.slice(end, end + 60).trimStart();
+  if (comparisonArticle(source, start)) return false;
+  if (/^(?:is|denotes|represents|equals|controls|corresponds|takes|determines|defines|indicates|ranges)\b/i.test(after)) return true;
+  if (/^(?:and|or)\s+[A-Za-z]\d*(?![A-Za-z0-9_])/.test(after)) return true;
+  if (/\b(?:E|P|Pr|Var|Cov)\s*\[\s*$/.test(before) && /^\]/.test(after)) return true;
+  const name = /\b(?:let|denote|given|scalar|matrix|tensor|variable|parameter|operator|vector|image|input|coordinate)\s+$/i.test(before);
+  const delimiter = !after || /^[,.;:!?()[\]{}=<>≤≥]/.test(after);
+  const relation = /^(?:and|or|are|was|were|be|as|by|to|in|for|with|under|from)\b/i.test(after);
+  return (name || declared) && (delimiter || relation);
+}
 
 // Keep the exact substring reported by PDF layout and use text heuristics for
 // plain fonts and older imports that lack layout metadata.
@@ -45,11 +71,13 @@ export function protectMath(text, spans = [], paragraphId = 0) {
     }
     return { start, end };
   });
-  const abbreviations = [...source.matchAll(/\b(?:e\.g|i\.e)\./gi)];
+  const abbreviations = [...source.matchAll(/\b(?:(?:e\.g|i\.e)\b\.?|p\.(?=\s*\d))/gi)];
   for (const pattern of INLINE_MATH) {
     for (const match of source.matchAll(pattern)) {
       let start = match.index;
       let end = start + match[0].length;
+      // PDF extraction can omit the space before a parenthetical prose aside.
+      if (/^[A-Za-z]{2,}\([^)]*\b[A-Za-z]{2,}\s+[A-Za-z]{2,}\b[^)]*\)$/.test(match[0])) continue;
       // A section reference such as S3.5 must remain one identifier. Protecting
       // only S3 makes the restored value look like an altered decimal formula.
       if (/^[A-Za-z]\d+$/.test(match[0])) {
@@ -58,12 +86,18 @@ export function protectMath(text, spans = [], paragraphId = 0) {
       // In "achieve a >1000× speedup", a is an article, not a variable.
       // Keep the comparator and value protected without forcing an English a
       // into Chinese prose. Explicit mathematical definitions remain intact.
-      if (/^a\s+[<>≤≥]\s*\d/i.test(match[0]) &&
-          /\b(?:achieve[sd]?|provide[sd]?|show[sn]?|offer[sd]?|yield[sd]?)\s+$/i.test(source.slice(0, start))) {
-        start += match[0].match(/^a\s+/i)[0].length;
-      }
+      if (/^a\s+[<>≤≥]\s*\d/i.test(match[0])) start += comparisonArticle(source, start);
       if (!abbreviations.some(value => start >= value.index && end <= value.index + value[0].length)) ranges.push({ start, end });
     }
+  }
+  const ambiguous = [...source.matchAll(AMBIGUOUS_LETTER)];
+  const declared = new Set();
+  for (const match of ambiguous) {
+    if (variableUse(source, match.index, match.index + 1) || ranges.some(({ start, end }) => match.index >= start && match.index < end)) declared.add(match[0]);
+  }
+  for (const match of ambiguous) {
+    const start = match.index;
+    if (declared.has(match[0]) && variableUse(source, start, start + 1, true)) ranges.push({ start, end: start + 1 });
   }
   ranges.sort((a, b) => a.start - b.start || b.end - a.end);
   const merged = [];
@@ -101,13 +135,13 @@ export function restoreMath(text, tokens) {
 }
 
 const escapePattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const MATH_WORD = String.raw`[A-Za-z0-9_^${MATH_LETTERS}${SCRIPT_CHARS}]`;
+const MATH_WORD = String.raw`[A-Za-z0-9_^${MATH_LETTERS}${MODIFIERS}]`;
 const MATH_WORD_END = new RegExp(`${MATH_WORD}$`, 'u');
 
 function literalMathPattern(value) {
   const standalone = /^[A-Za-z0-9_\p{Script=Greek}]+$/u.test(value);
   const left = standalone ? String.raw`(?<![A-Za-z0-9_\p{Script=Greek}])` : '';
-  const right = MATH_WORD_END.test(value) ? String.raw`(?!${MATH_WORD}|\.\d)` : '';
+  const right = MATH_WORD_END.test(value) ? String.raw`(?!${MATH_WORD}|\.\d|'(?![A-Za-z]))` : '';
   return `${left}${escapePattern(value)}${right}`;
 }
 
@@ -130,6 +164,11 @@ export function restoreMathTolerant(text, tokens) {
     const marker = parts && `⟦${parts[1].normalize('NFKC').toUpperCase()}:${parts[2].normalize('NFKC')}:${parts[3].normalize('NFKC')}⟧`;
     const token = markers.get(marker);
     if (!token && !literals.has(match[0])) return null;
+    if (!token && AMBIGUOUS_VARIABLE.test(match[0]) && !variableUse(input, match.index, match.index + 1, true)) {
+      const nearbyHan = /\p{Script=Han}/u.test(input.slice(Math.max(0, match.index - 3), match.index + 4));
+      const beforeProse = /^\s+[A-Za-z]{2,}/.test(input.slice(match.index + 1, match.index + 32));
+      if (!nearbyHan || beforeProse) continue;
+    }
     hasMarkers ||= Boolean(token);
     found.push(token ?? { value: match[0] });
     restored += preceding + (token?.value ?? match[0]);
@@ -163,12 +202,6 @@ export function validateTranslation(paragraph, value, tokens) {
   return { text };
 }
 
-// Last-resort repair when the model rewrote or dropped math markers: keep the
-// translation text and drop the markers instead of leaving the paragraph
-// untranslated forever.
-export function stripMathMarkers(value) {
-  return String(value ?? '').replace(/⟦[^⟧\r\n]*⟧?/gu, '').replace(/\s{2,}/gu, ' ').trim();
-}
 export function translationFragments(paragraph) {
   const { text, tokens } = protectMath(paragraph.text, paragraph.mathSpans, paragraph.id);
   const paragraphs = [];

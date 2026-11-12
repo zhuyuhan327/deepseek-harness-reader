@@ -11,7 +11,7 @@ test('按页升级旧版面时保留相同段落和译文，旧客户端也不�
   const root = join(temp, 'library');
   await mkdir(root);
   const origin = 'http://127.0.0.1:8767/api/dsh-quiet-reader';
-  const currentLayoutVersion = 15;
+  const currentLayoutVersion = 16;
   const pdf = Buffer.from('%PDF-1.7\nLayout upgrade fixture\n%%EOF');
   const id = createHash('sha256').update(pdf).digest('hex');
   const path = join(root, id);

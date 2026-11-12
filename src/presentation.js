@@ -141,7 +141,7 @@ function translationUnits(text, paragraph, width, height, obstacles) {
   return units;
 }
 
-function wrap(ctx, units, width, size, font, mathFont) {
+function wrap(ctx, units, width, size, font, mathFont, measureText) {
   const lines = [];
   let line = [];
   let advance = 0;
@@ -161,9 +161,9 @@ function wrap(ctx, units, width, size, font, mathFont) {
     const scale = unit.source ? size / unit.source.size : 1;
     const nextFont = unit.math && !unit.source ? mathFont : font;
     if (nextFont !== currentFont) ctx.font = currentFont = nextFont;
-    const measured = unit.source ? unit.source.width * scale : ctx.measureText(unit.text).width;
-    const items = measured > width && !unit.source
-      ? [...segments.segment(unit.text)].map(({ segment }) => ({ text: segment, math: unit.math, advance: ctx.measureText(segment).width }))
+    const measured = unit.source ? unit.source.width * scale : measureText(unit.text).width;
+    const items = measured > width && !unit.source && !unit.math
+      ? [...segments.segment(unit.text)].map(({ segment }) => ({ text: segment, math: unit.math, advance: measureText(segment).width }))
       : [{ ...unit, advance: measured, scale }];
     for (const item of items) {
       if (line.length && advance + item.advance > width) {
@@ -188,7 +188,7 @@ function pixels([l, t, r, b], width, height) {
   return [l * width, t * height, r * width, b * height];
 }
 
-function fit(ctx, units, paragraph, width, height, bodySize, minimumSize = 5.5) {
+function fit(ctx, units, paragraph, width, height, bodySize, measureText) {
   const [left, top, right, bottom] = pixels(paragraph.box, width, height);
   const w = right - left;
   const h = bottom - top;
@@ -201,19 +201,26 @@ function fit(ctx, units, paragraph, width, height, bodySize, minimumSize = 5.5) 
   const layoutAt = size => {
     const font = `${heading ? '700' : '400'} ${size}px ${family}`;
     const mathFont = `400 ${size}px ${MATH}`;
-    const lines = wrap(ctx, units, w, size, font, mathFont);
+    const lines = wrap(ctx, units, w, size, font, mathFont, measureText);
     if (!lines.length || lines.some(line => line.advance > w + .01)) return null;
     ctx.font = font;
-    const metrics = ctx.measureText('国Agα');
+    const metrics = measureText('国Agα');
     const ascent = metrics.actualBoundingBoxAscent || size * .8;
     const descent = metrics.actualBoundingBoxDescent || size * .2;
     for (const line of lines) {
       line.ascent = ascent;
       line.descent = descent;
-      for (const { source, scale } of line.items) {
-        if (!source) continue;
-        line.ascent = Math.max(line.ascent, (source.baseline - source.top) * scale);
-        line.descent = Math.max(line.descent, (source.top + source.height - source.baseline) * scale);
+      for (const { source, scale, math, text } of line.items) {
+        if (source) {
+          line.ascent = Math.max(line.ascent, (source.baseline - source.top) * scale);
+          line.descent = Math.max(line.descent, (source.top + source.height - source.baseline) * scale);
+        } else {
+          ctx.font = math ? mathFont : font;
+          const ink = measureText(text);
+          const stroke = !heading && !math ? size * .0125 : 0;
+          line.ascent = Math.max(line.ascent, (ink.actualBoundingBoxAscent || ascent) + stroke);
+          line.descent = Math.max(line.descent, (ink.actualBoundingBoxDescent || descent) + stroke);
+        }
       }
     }
     for (const leading of [normalLeading, 1.13]) {
@@ -228,7 +235,7 @@ function fit(ctx, units, paragraph, width, height, bodySize, minimumSize = 5.5) 
     return null;
   };
   let best = layoutAt(sizeLimit);
-  const minimum = Math.min(sizeLimit, minimumSize);
+  const minimum = Math.min(sizeLimit, Math.max(6.5, paragraph.kind === 'caption' ? 6.5 : bodySize * .7));
   for (let size = Math.floor((sizeLimit - .001) * 2) / 2; !best && size >= minimum; size -= .5) best = layoutAt(size);
   if (!best) return null;
   const align = heading && ['center', 'right'].includes(style.align) ? style.align : 'left';
@@ -262,10 +269,12 @@ function expandBox(paragraph, neighbors, width, height, bodySize) {
   return [l, t, Math.max(r, right), Math.max(b, bottom)];
 }
 
-function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded, bodySize) {
+function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded, bodySize, measureText) {
   const { width, height } = dimensions;
   const measure = box => {
-    const layout = fit(ctx, units, { ...paragraph, box }, width, height, bodySize);
+    const sourceWidth = (paragraph.box[2] - paragraph.box[0]) * width;
+    if ((box[2] - box[0]) * width < Math.min(sourceWidth * .65, bodySize * 8)) return null;
+    const layout = fit(ctx, units, { ...paragraph, box }, width, height, bodySize, measureText);
     if (!layout) return null;
     const lines = placedLines(layout, width, height);
     return lines.some(line => obstacles.some(box => overlap(line.box, box) > 1e-10)) ? null : { layout, lines, frame: box };
@@ -283,45 +292,6 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
   }
   // Incomplete or overflowing text must fail export preflight. Clipping a
   // partial translation and reporting it as painted silently loses content.
-  // Some blocks are narrower than their Chinese text at the readable minimum.
-  // Try a much larger free rectangle (column width, several lines tall) and a
-  // smaller floor before giving up, so the translation still lands on the page.
-  if (!best) {
-    const [l, t, r, b] = paragraph.box;
-    const roomy = [l, t, Math.min(.985, Math.max(r, .9)),
-      Math.min(.985, Math.max(b + bodySize * 10 / height, b + .06))];
-    const attempt = (box, minimumSize) => {
-      const layout = fit(ctx, units, { ...paragraph, box }, width, height, bodySize, minimumSize);
-      if (!layout) return null;
-      const lines = placedLines(layout, width, height);
-      return lines.some(line => obstacles.some(obstacle => overlap(line.box, obstacle) > 1e-10))
-        ? null : { layout, lines, frame: box };
-    };
-    best = attempt(roomy, 4.5);
-    for (const box of availableBoxes(roomy, obstacles)) {
-      const candidate = attempt(box, 4.5);
-      if (candidate && (!best || candidate.layout.size > best.layout.size)) best = candidate;
-    }
-    // Still nothing next to the source block: fall back to a page-margin band.
-    // Every printed page has a margin, so the translation stays visible instead
-    // of being dropped with a "switch to reflow" notice.
-    const bands = [
-      [.02, .90, .98, .995],
-      [.02, .82, .98, .995],
-      [.02, .74, .98, .995],
-      [.02, .02, .14, .98],
-    ];
-    for (const band of bands) {
-      if (best) break;
-      const candidate = attempt(band, 4.5);
-      if (candidate) best = candidate;
-      if (best) break;
-      for (const box of availableBoxes(band, obstacles)) {
-        const piece = attempt(box, 4.5);
-        if (piece) { best = piece; break; }
-      }
-    }
-  }
   return best;
 }
 
@@ -332,15 +302,21 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   canvas.width = source.width;
   canvas.height = source.height;
   const ctx = canvas.getContext('2d');
+  // Font measurement dominates repeated fitting. Cache only within this paint,
+  // so zoom changes and newly loaded fonts always get fresh measurements.
+  const metrics = new Map();
+  const measureText = text => {
+    const key = `${ctx.font}\0${text}`;
+    if (!metrics.has(key)) {
+      if (metrics.size >= 8000) metrics.clear();
+      metrics.set(key, ctx.measureText(text));
+    }
+    return metrics.get(key);
+  };
   ctx.drawImage(source, 0, 0);
   ctx.save();
   ctx.scale(canvas.width / width, canvas.height / height);
   const protectedBoxes = protectedAreas(paragraphs, regions, translations);
-  // Large non-text blocks that translated text must not cover.
-  const largeBox = box => Array.isArray(box) && box.length === 4 && box.every(Number.isFinite)
-    && (box[2] - box[0]) * (box[3] - box[1]) >= .006;
-  const barriers = [...regions.map(region => region.box).filter(largeBox),
-    ...paragraphs.filter(item => !isTranslatable(item.kind) && largeBox(item.box)).map(item => item.box)];
   const occupied = [];
   const placements = [];
   for (const paragraph of pageOverlays(paragraphs, translations, regions)) {
@@ -352,117 +328,19 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
         .filter(validBox);
       const expanded = expandBox(paragraph, neighbors, width, height, bodySize);
       const units = translationUnits(translations[paragraph.id], paragraph, width, height, neighbors);
-      const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(expanded, box) > 0);
-      let placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize);
-      // Never leave a translated paragraph unpainted: retry without obstacles.
-      if (!placement) placement = placeTranslation(ctx, units, paragraph, dimensions, [], expanded, bodySize);
+      // Reserve source lines of paragraphs not yet painted. A fallback must
+      // not consume another column or erase a paragraph that later cannot fit.
+      const pending = paragraphs.filter(p => p !== paragraph && !placements.some(item => item.paragraph === p))
+        .flatMap(sourceBoxes);
+      const nearby = [...protectedBoxes, ...occupied, ...pending].filter(box => overlap(expanded, box) > 0);
+      const placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize, measureText);
       if (!placement) continue;
       placements.push({ ...placement, paragraph });
-      occupied.push(...placement.lines.map(line => line.box));
+      occupied.push(...placement.lines.map(({ box: [l, t, r, b] }) =>
+        [l - .35 / width, t - .35 / height, r + .35 / width, b + .35 / height]));
     } catch {
       continue;
     }
-  }
-
-  // Re-flow each column so translated blocks never overlap. A block keeps its
-  // source position when it fits; otherwise it is pushed down and the following
-  // blocks follow, exactly like adding space in a document. Only when the whole
-  // column would overflow does the group move up as one unit.
-  for (const side of [0, 1]) {
-    const column = placements
-      .filter(item => ((item.paragraph.box[0] + item.paragraph.box[2]) / 2 < .5) === (side === 0))
-      .sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1]);
-    if (column.length < 2) continue;
-    const gap = bodySize * .2;
-    const extents = column.map(item => {
-      const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
-      const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
-      return { item, top: Math.min(...tops), bottom: Math.max(...bottoms) };
-    });
-    const heights = extents.map(extent => extent.bottom - extent.top);
-    const sourceTops = column.map(item => item.paragraph.box[1] * height);
-    const base = Math.min(...sourceTops);
-    const stack = from => {
-      const result = [];
-      let cursor = from;
-      for (const [index, extent] of extents.entries()) {
-        let top = Math.max(sourceTops[index], cursor);
-        const [xLeft, , xRight] = column[index].paragraph.box;
-        for (let guard = 0; guard < 6; guard++) {
-          let moved = false;
-          for (const box of barriers) {
-            if (box[2] <= xLeft || box[0] >= xRight) continue;
-            const boxTop = box[1] * height;
-            const boxBottom = box[3] * height;
-            if (top < boxBottom + gap && top + heights[index] > boxTop) {
-              top = boxBottom + gap;
-              moved = true;
-            }
-          }
-          if (!moved) break;
-        }
-        result.push(top);
-        cursor = top + heights[index] + gap;
-      }
-      return { tops: result, bottom: cursor - gap };
-    };
-    let flow = stack(base);
-    let overflow = flow.bottom - height * .995;
-    if (overflow > 0) {
-      const room = Math.max(0, base - height * .01);
-      flow = stack(base - Math.min(overflow, room));
-    }
-    for (const [index, extent] of extents.entries()) {
-      const delta = flow.tops[index] - extent.top;
-      if (!delta) continue;
-      for (const line of extent.item.lines) {
-        line.y += delta;
-        line.box[1] += delta / height;
-        line.box[3] += delta / height;
-      }
-      if (extent.item.frame) {
-        extent.item.frame[1] += delta / height;
-        extent.item.frame[3] += delta / height;
-      }
-    }
-  }
-  // Final collision pass: margin notes and fragments may still overlap the main
-  // column after the per-column pass. Push the lower block down until the page
-  // has no two translated blocks on top of each other.
-  const extentOf = item => {
-    const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
-    const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
-    return { top: Math.min(...tops), bottom: Math.max(...bottoms) };
-  };
-  const shiftBy = (item, delta) => {
-    for (const line of item.lines) {
-      line.y += delta;
-      line.box[1] += delta / height;
-      line.box[3] += delta / height;
-    }
-    if (item.frame) {
-      item.frame[1] += delta / height;
-      item.frame[3] += delta / height;
-    }
-  };
-  const collide = (a, b) => a.lines.some(left => b.lines.some(right => {
-    const topA = left.y - (left.line.ascent ?? 0);
-    const bottomA = left.y + (left.line.descent ?? 0);
-    const topB = right.y - (right.line.ascent ?? 0);
-    const bottomB = right.y + (right.line.descent ?? 0);
-    return topA < bottomB - .5 && topB < bottomA - .5
-      && left.x < right.x + right.line.advance - .5 && right.x < left.x + left.line.advance - .5;
-  }));
-  const settleGap = bodySize * .2;
-  const settledBlocks = [];
-  for (const item of [...placements].sort((a, b) => extentOf(a).top - extentOf(b).top)) {
-    for (let guard = 0; guard < 8; guard++) {
-      const hit = settledBlocks.filter(other => collide(item, other));
-      if (!hit.length) break;
-      const bottom = Math.max(...hit.map(other => extentOf(other).bottom));
-      shiftBy(item, bottom + settleGap - extentOf(item).top);
-    }
-    settledBlocks.push(item);
   }
 
   // Mask all of the source text first. Overlapping source line boxes must not
@@ -470,18 +348,13 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   const maskPadX = .62;
   const maskPadTop = .86;
   const maskPadBottom = .70;
-  for (const { paragraph, frame } of placements) {
+  const unpainted = paragraphs.filter(p => isTranslatable(p.kind) && !placements.some(item => item.paragraph === p));
+  const maskObstacles = [...protectedBoxes, ...unpainted.flatMap(sourceBoxes)];
+  for (const { paragraph } of placements) {
     const [l, t, r, b] = paragraph.box;
     const padded = [l - maskPadX / width, t - maskPadTop / height, r + maskPadX / width, b + maskPadBottom / height];
-    // The cleared area is the union of the source block and the frame the
-    // translation was moved to; every protected block touching either of them
-    // must be preserved while masking.
-    const paintArea = frame
-      ? [Math.min(padded[0], frame[0]), Math.min(padded[1], frame[1]),
-        Math.max(padded[2], frame[2]), Math.max(padded[3], frame[3])]
-      : padded;
     ctx.save();
-    for (const obstacle of protectedBoxes.filter(box => overlap(paintArea, box) > 0)) {
+    for (const obstacle of maskObstacles.filter(box => overlap(padded, box) > 0)) {
       const [left, top, right, bottom] = pixels(obstacle, width, height);
       ctx.beginPath();
       ctx.rect(0, 0, width, height);
@@ -492,16 +365,6 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     for (const lineBox of sourceBoxes(paragraph)) {
       const [left, top, right, bottom] = pixels(lineBox, width, height);
       ctx.fillRect(left - maskPadX, top - maskPadTop, right - left + maskPadX * 2, bottom - top + maskPadTop + maskPadBottom);
-    }
-    // Even when the translation had to move to a fallback frame, the source
-    // block itself must be cleared so its English never shows through.
-    {
-      const [left, top, right, bottom] = pixels(paragraph.box, width, height);
-      ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
-    }
-    if (frame) {
-      const [left, top, right, bottom] = pixels(frame, width, height);
-      ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
     }
     ctx.restore();
   }

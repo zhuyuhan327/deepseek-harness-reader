@@ -188,6 +188,24 @@ test('模型反复漏掉公式时控制片段请求总量，并留下可继续�
   assert.deepEqual(translations, {});
 });
 
+test('补译仍缺少公式时保留失败段落，不保存剥去公式的正文', async () => {
+  const item = { ...paragraph(1), text: 'We estimate x = σ before filtering.' };
+  const translations = {};
+  let saves = 0;
+  const failures = await translateDocument({
+    document: { paragraphs: [item] }, translations, signal: new AbortController().signal,
+    async save() { saves++; },
+    async request(_system, data, _maxTokens, { phase }) {
+      if (phase !== 'fragments') return { text: '{"1":"我们在滤波前进行估计。"}', finished: true };
+      const replies = { 'We estimate': '我们估计 x = σ', 'before filtering.': '在滤波前。' };
+      return { text: JSON.stringify(Object.fromEntries(data.paragraphs.map(p => [p.id, replies[p.text]]))), finished: true };
+    },
+  });
+  assert.deepEqual(failures, [{ id: 1, page: 1, reason: 'math' }]);
+  assert.deepEqual(translations, {});
+  assert.equal(saves, 0);
+});
+
 test('未完成的编号回复不保存半句，单段重试后保存完整译文', async () => {
   const translations = {};
   let calls = 0;

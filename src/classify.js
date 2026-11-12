@@ -201,9 +201,15 @@ function runInHeading(paragraph, text, next, regions) {
 
 function equationAnnotation(paragraph, text, index, paragraphs, kinds, bodySize) {
   const size = paragraph.style?.size;
-  if (!size || size > bodySize * .82 || text.length > 48 || !/^[A-Za-z]+(?: [A-Za-z]+)+$/.test(text)) return false;
   const [left, top, right, bottom] = paragraph.box;
   const height = bottom - top;
+  if (/^\([A-Za-z]+(?: [A-Za-z]+)+\)[,.]? \([A-Z]?\d+(?:\.\d+)*\)$/.test(text)) {
+    const equation = paragraphs[index - 1];
+    return equation?.page === paragraph.page && kinds[index - 1] === KIND_FORMULA
+      && (equation.lines ?? [equation.box]).some(([, eqTop, eqRight]) => eqRight <= left && left - eqRight < .13
+        && Math.abs(eqTop - top) < height * .4);
+  }
+  if (!size || size > bodySize * .82 || text.length > 48 || !/^[A-Za-z]+(?: [A-Za-z]+)+$/.test(text)) return false;
   for (let i = index - 1; i >= Math.max(0, index - 8); i--) {
     const equation = paragraphs[i];
     if (equation.page !== paragraph.page) break;

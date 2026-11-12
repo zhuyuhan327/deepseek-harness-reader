@@ -99,6 +99,15 @@ test('下括号正下方的小字号注释和公式一起保留，邻栏正文�
   assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'formula', 'formula', 'text', 'text']);
 });
 
+test('公式同行的编号注释保留，其他行上的括号短语仍可翻译', () => {
+  const paragraphs = [
+    paragraph(1, 3, [.133, .7386, .249, .752], 'xˆt ← D(xt, Y, t)'),
+    paragraph(2, 3, [.326, .7393, .482, .7513], '(denoised signal), (3)'),
+    paragraph(3, 3, [.326, .7710, .482, .7830], '(denoised signal), (3)'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['formula', 'formula', 'text']);
+});
+
 test('标题按字号与粗体识别，正文与图注仍按原规则分类', () => {
   const p = (id, box, text, style) => ({ id, page: 1, box, text, ...(style ? { style } : {}) });
   const paragraphs = [
