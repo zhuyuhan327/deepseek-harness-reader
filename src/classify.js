@@ -88,6 +88,8 @@ function isCaption(text) {
 export function looksLikeMath(text) {
   const value = flat(text);
   if (!value || hasProse(value.replace(OPTIMIZATION_OPERATOR, ''))) return false;
+  // A run of digits/operators/single letters carries no translatable words.
+  if (!/[A-Za-z]{3,}/u.test(value) && value.length <= 60) return true;
   if (EQUATION_TAG.test(value) || COMPLEXITY_RANGE.test(value) || numericRow(value)) return true;
   if (PROSE_START.test(value)) return false;
   const symbols = value.match(MATH_SYMBOL)?.length ?? 0;

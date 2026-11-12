@@ -178,3 +178,15 @@ test('粗体附录编号拆成独立文本块时仍退出参考文献，并保�
   ];
   assert.deepEqual(classifyParagraphs(paragraphs), ['skip', 'skip', 'heading', 'text']);
 });
+
+test('纯符号与公式碎片不会被当作正文翻译', () => {
+  for (const value of ['1 n', 'i y2 i 2', 'n i=1 f✓(y1)', '2 ✓ ✓ (1)']) {
+    assert.equal(looksLikeMath(value), true, value);
+  }
+  assert.equal(looksLikeMath('3 Method'), false);
+  const paragraphs = [
+    paragraph(1, 2, [0.5, 0.1, 0.6, 0.12], '1 n'),
+    paragraph(2, 2, [0.5, 0.13, 0.9, 0.2], 'A net-work is then trained to minimize the empirical risk'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['formula', 'text']);
+});
