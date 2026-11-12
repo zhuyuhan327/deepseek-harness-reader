@@ -35,6 +35,23 @@ function page(items, operators = []) {
   };
 }
 
+test('同一基线的断行碎片会合并成一个段落', async () => {
+  const items = [
+    run('achieve state-of-the-art perfor-', 100, 100, 180),
+    run('mance on single images.', 300, 100, 120),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
+  assert.equal(paragraphs.length, 1);
+  assert.equal(paragraphs[0].text, 'achieve state-of-the-art perfor-mance on single images.');
+});
+
+test('符号字体提取出的 NUL 字符会被清理', async () => {
+  const items = [run('y = f\u0000(x) works.', 100, 120, 140)];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
+  assert.equal(paragraphs[0].text.includes('\u0000'), false);
+  assert.match(paragraphs[0].text, /works\./);
+});
+
 test('PDF layout reads each column in order beneath a spanning heading', async () => {
   const items = [run('A study with two columns', 178, 45, 240, 'bold', 18)];
   for (const [index, y] of [85, 98, 111].entries()) {

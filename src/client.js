@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
       const metadata = await handle.document.getMetadata().catch(() => ({}));
       const embeddedTitle = metadata.info?.Title;
       const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || String(filename ?? 'paper').replace(/\.pdf$/i, '');
-      return { title, pages, paragraphs, regions, layoutVersion: 3, range: { first, last } };
+      return { title, pages, paragraphs, regions, layoutVersion: 4, range: { first, last } };
     }
 
     function place(box) {
@@ -690,7 +690,7 @@ window.__ModuleLoader__.load({
         const firstPage = paper?.range?.first ?? 1;
         const lastPage = paper?.range?.last ?? paper?.pages.length ?? 1;
         const layoutPages = new Set(paper?.layoutPages);
-        const needsLayout = paper && (paper.layoutVersion !== 3 ||
+        const needsLayout = paper && (paper.layoutVersion !== 4 ||
           Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i).some(page => !layoutPages.has(page)));
         const activeParagraphs = new Set(paper?.paragraphs.map(p => p.id));
         const untranslated = (paper?.paragraphs ?? []).filter(p =>

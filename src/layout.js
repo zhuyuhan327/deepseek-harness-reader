@@ -163,7 +163,11 @@ function textRuns(pdfjs, page, viewport, content) {
   const fonts = new Map();
   const runs = [];
   for (const item of content.items) {
-    if (typeof item.str !== 'string' || !item.str.trim()) continue;
+    if (typeof item.str !== 'string') continue;
+    // Symbol-font glyphs often extract as NUL/replacement characters; drop them
+    // before they reach the translator or the overlay painter.
+    const str = item.str.replace(/[\u0000\uFFFD\u200B]/gu, '');
+    if (!str.trim()) continue;
     const [a, b, c, d, x, baseline] = pdfjs.Util.transform(viewport.transform, item.transform);
     const size = Math.hypot(c, d);
     if (![x, baseline, size, item.width].every(Number.isFinite) || size < 1 || item.width <= 0) continue;
@@ -176,7 +180,7 @@ function textRuns(pdfjs, page, viewport, content) {
     }
     const box = [x, baseline - size * font.ascent, x + item.width * (viewport.scale ?? 1), baseline + size * font.descent];
     if (width(box) <= 0) continue;
-    runs.push({ text: item.str.trim(), leading: /^\s/u.test(item.str), trailing: /\s$/u.test(item.str), box, baseline, size, font });
+    runs.push({ text: str.trim(), leading: /^\s/u.test(str), trailing: /\s$/u.test(str), box, baseline, size, font });
   }
   return runs;
 }
@@ -612,6 +616,64 @@ function assembleParagraphs(lines, viewport, number, normalize) {
   });
 }
 
+function crossesGutter(line, gutter, typical) {
+  return gutter !== null && line.box[0] < gutter - typical * .55 && line.box[2] > gutter + typical * .55;
+}
+
+function mergeFragments(left, right, gutter, typical) {
+  if (left.region || right.region) return false;
+  if (crossesGutter(left, gutter, typical) || crossesGutter(right, gutter, typical)) return false;
+  if (gutter !== null && (center(left.box) < gutter) !== (center(right.box) < gutter)) return false;
+  const gap = right.box[0] - left.box[2];
+  if (gap > typical * 2.6 || gap < -typical * .8) return false;
+  if (Math.abs(left.size - right.size) > Math.max(left.size, right.size) * .2) return false;
+  if (CAPTION.test(right.text)) return false;
+  // A finished sentence followed by a capitalised new block is a real break,
+  // even when the two boxes sit close together on one baseline.
+  if (gap > typical * .5 && /[.!?]["'”’)]?$/u.test(left.text) && /^[A-Z0-9]/u.test(right.text)) return false;
+  return /[A-Za-z]{2}/u.test(left.text) || /[A-Za-z]{2}/u.test(right.text);
+}
+
+function mergeInline(left, right) {
+  const glue = /\p{Letter}-$/u.test(left.text) && /^\p{Ll}/u.test(right.text) ? '' : ' ';
+  const offset = left.text.length + glue.length;
+  left.text += glue + right.text;
+  left.box = union(left.box, right.box);
+  for (const span of right.mathSpans ?? []) {
+    left.mathSpans.push({ start: span.start + offset, end: span.end + offset, box: span.box });
+  }
+  left.mathRatio = left.mathSpans.reduce((count, span) => count + span.end - span.start, 0) / Math.max(1, left.text.length);
+  left.runs = undefined;
+}
+
+/**
+ * Rows split at every gap wider than a word space, so an inline formula or a
+ * column-local word gap leaves one-line fragments that later become separate
+ * "paragraphs". Merge those neighbours back into one line first.
+ */
+function mergeBaselineFragments(lines, gutter, typical) {
+  const sorted = [...lines].sort((a, b) => a.baseline - b.baseline || a.box[0] - b.box[0]);
+  const result = [];
+  let row = [];
+  const flush = () => {
+    if (!row.length) return;
+    const kept = [];
+    for (const line of row.sort((a, b) => a.box[0] - b.box[0])) {
+      const previous = kept.at(-1);
+      if (previous && mergeFragments(previous, line, gutter, typical)) mergeInline(previous, line);
+      else kept.push(line);
+    }
+    result.push(...kept);
+    row = [];
+  };
+  for (const line of sorted) {
+    if (row.length && Math.abs(line.baseline - row[0].baseline) > typical * .45) flush();
+    row.push(line);
+  }
+  flush();
+  return result;
+}
+
 export async function extractPageLayout(pdfjs, page, viewport, number) {
   const [content, operators] = await Promise.all([
     page.getTextContent(),
@@ -632,7 +694,8 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   markRunInHeadings(validRows);
   const gutter = findGutter(lines, viewport.width, typical);
   const joined = rejoinJustifiedRows(validRows, gutter, regions);
-  const ordered = orderLines(joined, gutter, viewport.width, typical, number);
+  const merged = mergeBaselineFragments(joined, gutter, typical);
+  const ordered = orderLines(merged, gutter, viewport.width, typical, number);
   const separated = splitEquationProse(ordered);
   const paragraphs = assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
