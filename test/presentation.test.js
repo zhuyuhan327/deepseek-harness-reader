@@ -7,7 +7,7 @@ test('原位排版沿用标题字号，并从原页绘制匹配的数学字形',
   const draws = [];
   const painted = [];
   const ctx = {
-    save() {}, restore() {}, scale() {}, fillRect() {},
+    save() {}, restore() {}, scale() {}, fillRect() {}, beginPath() {}, rect() {}, clip() {}, strokeText() {},
     drawImage(...args) { draws.push(args); },
     fillText(text) { painted.push(text); },
     measureText(text) { return { width: [...text].length * 5, actualBoundingBoxAscent: 7, actualBoundingBoxDescent: 2 }; },
@@ -108,13 +108,16 @@ test('与其他原文块相交的行内公式改用数学字体绘制', () => {
   assert.match(events.find(event => event.type === 'text' && event.text === 'x').font, /Cambria Math/);
 });
 
-test('无法在可读字号下容纳的译文不会遮盖原文或加入 PDF 文字层', () => {
+test('极窄区域也会排版译文并裁剪在本块内，不遮盖相邻内容', () => {
   const { canvas, events } = recordingCanvas();
   const page = { width: 200, height: 200 };
-  const paragraph = { id: 1, kind: 'text', text: 'An extremely narrow region', box: [.1, .1, .18, .13] };
+  const paragraph = { id: 1, kind: 'text', text: 'An extremely narrow region', box: [.1, .1, .18, .13],
+    style: { size: 5.5 } };
   const lines = paintTranslation(canvas, page, page, [paragraph], { 1: '这是一段需要完整保存的译文'.repeat(3) });
-  assert.deepEqual(lines, []);
-  assert.equal(events.filter(event => event.type === 'mask').length, 0);
+  assert.equal(lines.length > 0, true);
+  assert.ok(lines.every(line => line.size <= 5.5));
+  assert.equal(events.filter(event => event.type === 'mask').length, 1);
+  assert.ok(events.some(event => event.type === 'text'));
 });
 
 test('图形遮挡的图注仍需报告未排版，重叠的同文副本只计一次', () => {

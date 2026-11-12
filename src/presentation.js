@@ -225,6 +225,29 @@ function fit(ctx, units, paragraph, width, height, bodySize) {
   return { ...best, x, y, align };
 }
 
+// Last-resort layout: the translation must not disappear just because the
+// source block is narrow. Wrap at a small fixed size, ignore overflow, and let
+// the caller clip the paint to the block so neighbours stay untouched.
+function fallbackFit(ctx, units, paragraph, width, height, bodySize) {
+  const style = paragraph.style ?? {};
+  const heading = paragraph.kind === 'heading';
+  const size = Math.min(bodySize, 5.5);
+  const family = style.fontFamily === 'monospace' ? MONO : SANS;
+  const font = `${heading ? '700' : '400'} ${size}px ${family}`;
+  const mathFont = `400 ${size}px ${MATH}`;
+  const lines = wrap(ctx, units, Math.max(width, 1), size, font, mathFont);
+  if (!lines.length) return null;
+  ctx.font = font;
+  const metrics = ctx.measureText('国Agα');
+  let baseline = metrics.actualBoundingBoxAscent || size * .8;
+  const lead = size * 1.24;
+  for (const line of lines) {
+    line.baseline = baseline;
+    baseline += lead;
+  }
+  return { size, lines, font, mathFont, heading };
+}
+
 function placedLines(layout, width, height) {
   return layout.lines.map(line => {
     const y = layout.y + line.baseline;
@@ -255,7 +278,7 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
     const layout = fit(ctx, units, { ...paragraph, box }, width, height, bodySize);
     if (!layout) return null;
     const lines = placedLines(layout, width, height);
-    return lines.some(line => obstacles.some(box => overlap(line.box, box) > 1e-10)) ? null : { layout, lines };
+    return lines.some(line => obstacles.some(box => overlap(line.box, box) > 1e-10)) ? null : { layout, lines, frame: box };
   };
   let best = measure(paragraph.box);
   if (best?.layout.size >= bodySize) return best;
@@ -267,6 +290,10 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
       const alternative = measure(box);
       if (alternative && (!best || alternative.layout.size > best.layout.size)) best = alternative;
     }
+  }
+  if (!best) {
+    const layout = fallbackFit(ctx, units, paragraph, (expanded[2] - expanded[0]) * width, (expanded[3] - expanded[1]) * height, bodySize);
+    if (layout) best = { layout, lines: placedLines(layout, width, height), frame: expanded };
   }
   return best;
 }
@@ -325,7 +352,15 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   ctx.lineJoin = 'round';
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
-  for (const { paragraph, layout, lines } of placements) {
+  for (const { paragraph, layout, lines, frame } of placements) {
+    ctx.save();
+    // Keep every glyph inside its own block, so a fallback or a wide crop can
+    // never bleed over a formula or the neighbouring column.
+    const clip = frame ?? paragraph.box;
+    const [cl, ct, cr, cb] = pixels(clip, width, height);
+    ctx.beginPath();
+    ctx.rect(cl - .6, ct - .6, cr - cl + 1.2, cb - ct + 1.2);
+    ctx.clip();
     ctx.lineWidth = layout.size * .025;
     for (const { line, x, y } of lines) {
       let cursor = x;
@@ -361,6 +396,7 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       flush();
       textLines.push({ paragraphId: paragraph.id, text: line.text, x, y, width: line.advance, size: layout.size });
     }
+    ctx.restore();
   }
   ctx.restore();
   return textLines;
