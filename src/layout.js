@@ -792,7 +792,7 @@ function symbolParagraph(paragraph) {
  * baselines, side-by-side cells) still form one displayed equation. Join them
  * into a single block so the overlay treats the equation as one region.
  */
-function mergeAdjacentFormulas(paragraphs, typical, viewport) {
+function mergeAdjacentFormulas(paragraphs, typical, viewport, gutter) {
   const members = paragraphs.map((paragraph, index) => ({ paragraph, index })).filter(({ paragraph }) => symbolParagraph(paragraph));
   if (members.length < 3) return paragraphs;
   const clusters = [];
@@ -802,15 +802,20 @@ function mergeAdjacentFormulas(paragraphs, typical, viewport) {
       const b = member.paragraph.box;
       const vertical = (Math.max(a[1], b[1]) - Math.min(a[3], b[3])) * viewport.height;
       const side = (Math.max(a[0], b[0]) - Math.min(a[2], b[2])) * viewport.width;
-      return vertical <= typical * 2.5 && side <= typical * 2.5;
+      const sameColumn = gutter === null || ((a[0] + a[2]) / 2 < gutter) === ((b[0] + b[2]) / 2 < gutter);
+      return sameColumn && vertical <= typical * 2.5 && side <= typical * 6;
     }));
     if (near) near.push(member);
     else clusters.push([member]);
   }
   const merged = new Map();
   for (const cluster of clusters) {
-    if (cluster.length < 3) continue;
+    if (cluster.length < 2) continue;
     const total = cluster.reduce((sum, member) => sum + member.paragraph.text.length, 0);
+    const widest = Math.max(...cluster.map(({ paragraph }) => (paragraph.box[2] - paragraph.box[0]) * viewport.width));
+    // A displayed equation plus its number is a wide two-part cluster; inline
+    // glyph crops stay small and are left as separate blocks.
+    if (cluster.length < 3 && widest < typical * 8) continue;
     const width = (Math.max(...cluster.map(({ paragraph }) => paragraph.box[2])) - Math.min(...cluster.map(({ paragraph }) => paragraph.box[0]))) * viewport.width;
     if (width < typical * 4 || total > 260) continue;
     cluster.sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1] || a.paragraph.box[0] - b.paragraph.box[0]);
@@ -882,6 +887,6 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   const ordered = orderLines(merged, gutter, viewport.width, typical, number);
   const formulas = mergeFormulaLines(ordered, typical);
   const separated = splitEquationProse(formulas);
-  const paragraphs = mergeAdjacentFormulas(assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize), typical, viewport);
+  const paragraphs = mergeAdjacentFormulas(assembleParagraphs(orderInlineContinuations(attachTrailingIndices(separated), gutter), viewport, number, normalize), typical, viewport, gutter);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }
