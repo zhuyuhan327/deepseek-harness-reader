@@ -379,7 +379,7 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       const result = [];
       let cursor = from;
       for (const [index, extent] of extents.entries()) {
-        const top = Math.max(sourceTops[index], cursor);
+        let top = Math.max(sourceTops[index], cursor);
         result.push(top);
         cursor = top + heights[index] + gap;
       }
@@ -413,8 +413,15 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   for (const { paragraph, frame } of placements) {
     const [l, t, r, b] = paragraph.box;
     const padded = [l - maskPadX / width, t - maskPadTop / height, r + maskPadX / width, b + maskPadBottom / height];
+    // The cleared area is the union of the source block and the frame the
+    // translation was moved to; every protected block touching either of them
+    // must be preserved while masking.
+    const paintArea = frame
+      ? [Math.min(padded[0], frame[0]), Math.min(padded[1], frame[1]),
+        Math.max(padded[2], frame[2]), Math.max(padded[3], frame[3])]
+      : padded;
     ctx.save();
-    for (const obstacle of protectedBoxes.filter(box => overlap(padded, box) > 0)) {
+    for (const obstacle of protectedBoxes.filter(box => overlap(paintArea, box) > 0)) {
       const [left, top, right, bottom] = pixels(obstacle, width, height);
       ctx.beginPath();
       ctx.rect(0, 0, width, height);
