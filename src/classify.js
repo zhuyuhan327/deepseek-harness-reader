@@ -158,6 +158,9 @@ function regionKind(box, regions) {
   let bestCoverage = 0.65;
   let best;
   for (const { kind, box: region } of regions) {
+    // Displayed-equation bands only guide painting; they must not swallow the
+    // prose paragraphs that happen to sit inside their bounding box.
+    if (kind === KIND_FORMULA) continue;
     const width = Math.max(0, Math.min(right, region[2]) - Math.max(left, region[0]));
     const height = Math.max(0, Math.min(bottom, region[3]) - Math.max(top, region[1]));
     const coverage = width * height / area;
