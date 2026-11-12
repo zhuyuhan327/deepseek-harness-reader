@@ -8,6 +8,10 @@ window.__ModuleLoader__.load({
     const PANEL = 'dsh-quiet-reader';
     const PDF_LIMIT_MB = 40;
     const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
+    const translationFailureLabels = {
+      missing: '未收到有效译文', invalid: '译文内容异常',
+      math: '公式或变量未完整保留', incomplete: '译文不完整',
+    };
     let pdfLibrary;
 
     function endpoint(action, params = {}, write = false) {
@@ -109,7 +113,7 @@ window.__ModuleLoader__.load({
       const metadata = await handle.document.getMetadata().catch(() => ({}));
       const embeddedTitle = metadata.info?.Title;
       const title = (typeof embeddedTitle === 'string' && embeddedTitle.trim()) || String(filename ?? 'paper').replace(/\.pdf$/i, '');
-      return { title, pages, paragraphs, regions, layoutVersion: 1, range: { first, last } };
+      return { title, pages, paragraphs, regions, layoutVersion: 2, range: { first, last } };
     }
 
     function place(box) {
@@ -663,8 +667,8 @@ window.__ModuleLoader__.load({
         const firstPage = paper?.range?.first ?? 1;
         const lastPage = paper?.range?.last ?? paper?.pages.length ?? 1;
         const layoutPages = new Set(paper?.layoutPages);
-        const needsLayout = paper && Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i)
-          .some(page => !layoutPages.has(page));
+        const needsLayout = paper && (paper.layoutVersion !== 2 ||
+          Array.from({ length: lastPage - firstPage + 1 }, (_, i) => firstPage + i).some(page => !layoutPages.has(page)));
         const activeParagraphs = new Set(paper?.paragraphs.map(p => p.id));
         useEffect(() => {
           if (!paper) return;
@@ -781,6 +785,11 @@ window.__ModuleLoader__.load({
                     exporting ? '正在生成…' : '导出'),
                   h('button', { type: 'button', disabled: exporting, onClick: () => setExportOpen(false) }, '取消'))),
               paper.error && h('p', { className: 'qr-error', role: 'alert' }, paper.error),
+              paper.failedParagraphs?.length > 0 && h('div', { className: 'qr-actions' },
+                ...paper.failedParagraphs.map(failure => h('button', {
+                  key: failure.id, type: 'button',
+                  onClick: () => { setNumber(failure.page); setSelected(failure.id); },
+                }, `第 ${failure.page} 页 · 段 ${failure.id} · ${translationFailureLabels[failure.reason] ?? '待重试'}`))),
               viewMode === 'overlay'
                 ? h(Pages, { key: paper.id, paper, number, selected, choose: setSelected, zoom })
                 : h(Reflow, { key: `${paper.id}-reflow`, paper, number, selected, choose: setSelected, zoom }),

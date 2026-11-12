@@ -30,6 +30,7 @@ const APPENDIX_LETTER = /^[A-H](?:\.\d+)*\.?\s+\p{Lu}\p{L}/u;
 const REFERENCE_ENTRY = /^\[\d{1,3}\].*(?:\(\d{4}\)|\b(?:doi|vol\.|pp\.)|https?:\/\/)/i;
 const DATE_ONLY = /^(?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}$/i;
 const MATH_SYMBOL = /[=+<>^_{}|×÷±≈≤≥≠∑∏∫√∞∂∇∈∉⊂⊃∪∩→←↔⇒⇔∥−\u0370-\u03ff\u2070-\u209f]/g;
+const OPTIMIZATION_OPERATOR = /\barg\s*(?:min|max)(?=$|[\sA-Z_([{\p{Script=Greek}])/gu;
 const NUMERIC_CELL = /^[+−-]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:%|[eE][+−-]?\d+)?$/;
 const EQUATION_TAG = /^\([A-Z]?\d+(?:\.\d+)*[a-z]?\)$/;
 const ABSTRACT_START = /^abstract\b/i;
@@ -83,7 +84,7 @@ function isCaption(text) {
 /** Displayed equations, table rows and maths-heavy lines. */
 export function looksLikeMath(text) {
   const value = flat(text);
-  if (!value || hasProse(value)) return false;
+  if (!value || hasProse(value.replace(OPTIMIZATION_OPERATOR, ''))) return false;
   if (EQUATION_TAG.test(value) || numericRow(value)) return true;
   if (PROSE_START.test(value)) return false;
   const symbols = value.match(MATH_SYMBOL)?.length ?? 0;
@@ -163,6 +164,17 @@ function regionKind(box, regions) {
   return best;
 }
 
+function explainsInlineMath(paragraph, next, regions) {
+  if (next?.page !== paragraph.page || !next.mathSpans?.some(span => span.start <= 2)) return false;
+  const size = paragraph.style?.size;
+  const nextSize = next.style?.size;
+  if (!size || !nextSize || Math.abs(size - nextSize) > size * .12) return false;
+  const [, top, right, bottom] = paragraph.box;
+  const [left, nextTop] = next.lines?.[0] ?? next.box;
+  return left >= right && left - right < 0.12 && Math.abs(nextTop - top) < (bottom - top) * .35
+    && readable(next.text) && !looksLikeMath(next.text) && !regionKind(next.box, regions);
+}
+
 /**
  * @param paragraphs Extracted paragraphs with `page`, `box` and `text`.
  * @param pageRegions Optional figure and table boxes, with their page numbers.
@@ -236,7 +248,8 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
       return;
     }
     if (authorRange.has(paragraph)) return;
-    const within = regionKind(paragraph.box, regions.get(paragraph.page));
+    const onPage = regions.get(paragraph.page);
+    const within = regionKind(paragraph.box, onPage);
     if (within || numericRow(text)) {
       kinds[index] = within ?? KIND_TABLE;
       return;
@@ -264,7 +277,9 @@ export function classifyParagraphs(paragraphs, pageRegions = []) {
       kinds[index] = KIND_FIGURE;
       return;
     }
-    if ((width < 0.09 || (width < 0.14 && height < 0.03)) && !hasProse(text)) return;
+    const narrow = width < 0.09 || (width < 0.14 && height < 0.03);
+    const connective = /^where$/i.test(text) && explainsInlineMath(paragraph, paragraphs[index + 1], onPage);
+    if (narrow && !hasProse(text) && !connective) return;
     kinds[index] = KIND_TEXT;
   });
   return kinds;

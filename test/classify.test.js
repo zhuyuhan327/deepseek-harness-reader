@@ -43,6 +43,30 @@ test('数学行与普通句子的区分', () => {
   assert.equal(looksLikeMath('When θ ≤ 0, set x = 0.'), false);
 });
 
+test('独立优化方程保留原图，描述优化过程的正文照常翻译', () => {
+  const paragraphs = [
+    paragraph(1, 2, [0.53, 0.136, 0.87, 0.15], 'arg minE ∥fθ (y) − x∥2 = arg minE ∥fθ (y) − z∥2'),
+    paragraph(2, 2, [0.89, 0.136, 0.91, 0.147], '(1)'),
+    paragraph(3, 2, [0.52, 0.165, 0.88, 0.178], 'where fθ is the denoising network parameterized by θ.'),
+    paragraph(4, 2, [0.52, 0.179, 0.91, 0.205], 'Both the arg min and arg max operators select the optimizer θ.'),
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['formula', 'formula', 'text', 'text']);
+});
+
+test('与同一行的公式说明相连的 where 可翻译，孤立词和公式编号保留', () => {
+  const style = { size: 10 };
+  const paragraphs = [
+    { ...paragraph(1, 4, [0.52, 0.530, 0.56, 0.542], 'where'), style },
+    { ...paragraph(2, 4, [0.62, 0.530, 0.91, 0.543], 'Di(hϕ(y)) aligns with hϕ((y1 +y2)/2), dif-'), style, mathSpans: [{ start: 0, end: 9 }] },
+    { ...paragraph(3, 4, [0.52, 0.600, 0.56, 0.612], 'where'), style },
+    { ...paragraph(4, 4, [0.62, 0.600, 0.65, 0.612], '(3)'), style },
+    { ...paragraph(5, 4, [0.52, 0.650, 0.56, 0.662], '(Huang'), style },
+  ];
+  assert.deepEqual(classifyParagraphs(paragraphs), ['text', 'text', 'skip', 'formula', 'skip']);
+  const regions = [{ page: 4, kind: 'table', box: [0.61, 0.526, 0.92, 0.55] }];
+  assert.deepEqual(classifyParagraphs(paragraphs.slice(0, 2), regions), ['skip', 'table']);
+});
+
 test('标题按字号与粗体识别，正文与图注仍按原规则分类', () => {
   const p = (id, box, text, style) => ({ id, page: 1, box, text, ...(style ? { style } : {}) });
   const paragraphs = [

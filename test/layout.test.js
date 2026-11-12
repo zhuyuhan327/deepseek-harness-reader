@@ -52,6 +52,29 @@ test('PDF layout reads each column in order beneath a spanning heading', async (
   assert.equal(paragraphs[2].lines.length, 4);
 });
 
+test('PDF layout rejoins justified citation words with the continuation in the same column', async () => {
+  const items = [
+    run('The left column keeps its own preceding sentence.', 60, 78, 228),
+    run('The left column must stay separate from the citation.', 60, 90, 256),
+    run('The left column continues in reading order here.', 60, 102, 228),
+    run('The left column has more preceding text below.', 60, 114, 228),
+    run('A separate introductory statement ends here.', 316, 78, 228),
+    run('Neighbor2Neighbor', 326, 90, 78),
+    run('(Huang', 413.6, 90, 28),
+    run('et', 451.2, 90, 7),
+    run('al.', 467.8, 90, 9),
+    run('2021)', 486.4, 90, 22),
+    run('extends', 518, 90, 26),
+    run('Noise2Noise by enabling training on single noisy images.', 316, 102, 228),
+    run('Its network learns from individual noisy images.', 316, 114, 228),
+  ];
+  const { paragraphs } = await extractPageLayout(pdfjs, page(items), viewport, 2);
+  const merged = paragraphs.find(paragraph => paragraph.text.includes('Neighbor2Neighbor'));
+  assert.ok(merged);
+  assert.match(merged.text, /^Neighbor2Neighbor \(Huang et al\. 2021\) extends Noise2Noise by enabling training/);
+  assert.equal(merged.lines.length, 3);
+});
+
 test('PDF layout retains the full caption and marks inline scripts as math', async () => {
   const items = [
     run('Figure 2: Calculate ', 40, 84, 81),

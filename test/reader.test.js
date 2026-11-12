@@ -184,11 +184,11 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   };
   const first = await upload(1);
   const saved = await host.until(first.id, 'complete');
-  const reanalyzed = await upload(1, 1);
+  const reanalyzed = await upload(1, 2);
   assert.deepEqual(reanalyzed.layoutPages, [1]);
   assert.deepEqual(reanalyzed.translations, saved.translations);
 
-  const second = await upload(2, 1);
+  const second = await upload(2, 2);
   assert.equal(second.id, first.id);
   assert.equal(second.workspaceId, first.workspaceId);
   assert.deepEqual(second.range, { first: 2, last: 2 });
@@ -197,7 +197,7 @@ test('重导同一 PDF 的其他页保留既有段落编号与译文', async t =
   await host.request('translate', second.id, {});
   assert.equal((await host.until(second.id, 'complete')).translated, 1);
 
-  const reopened = await upload(1, 1);
+  const reopened = await upload(1, 2);
   assert.deepEqual(reopened.translations, saved.translations);
   assert.equal(host.calls.length, 2);
 });
@@ -457,8 +457,10 @@ test('模型始终返回无法解析的内容时报告错误而不是死循环',
   host.setReply(() => '抱歉，我无法完成这个请求。');
   const paper = await host.upload('Unusable output', 3);
   const failed = await host.until(paper.id, 'error');
-  assert.match(failed.error, /无法解析/);
+  assert.match(failed.error, /未完成/);
   assert.equal(failed.translated, 0);
+  assert.equal(failed.failedParagraphs.length, 3);
+  assert.ok(failed.failedParagraphs.every(item => item.page === 1 && item.reason === 'missing'));
   assert.ok(host.calls.length < 20);
 });
 

@@ -5,10 +5,10 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  routeFor, complete, looksComplete, protectMath, ReaderError, restoreMath, restoreMathTolerant, QUESTION_PROMPT, selectEvidence,
-  TRANSLATION_PROMPT, translationBatch, parseTranslations,
+  routeFor, complete, ReaderError, QUESTION_PROMPT, selectEvidence, validateTranslation,
 } from './model.js';
 import { classifyParagraphs, isTranslatable } from './classify.js';
+import { createRequestQueue, translateDocument } from './translation.js';
 
 export const name = 'dsh-quiet-reader';
 export const inject = ['connection', 'llm', 'workspaceRegistry'];
@@ -17,7 +17,7 @@ const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
 const ID = /^[a-f0-9]{64}$/;
 const require = createRequire(import.meta.url);
-const LAYOUT_VERSION = 1;
+const LAYOUT_VERSION = 2;
 
 function validBox(box) {
   return Array.isArray(box) && box.length === 4
@@ -142,7 +142,7 @@ function validateDocument(input) {
 
 // Older manifests are classified when read and saved in the current schema
 // on reimport. Reads never replace the manifest of a concurrent import.
-const SCHEMA = 3;
+const SCHEMA = 4;
 
 function withKinds(document) {
   const needs = document.schema !== SCHEMA || document.paragraphs.some(paragraph => paragraph.kind === undefined);
@@ -175,7 +175,7 @@ function activeDocument(document) {
 function mergeImport(stored, parsed) {
   const range = pageRange(parsed);
   const loaded = new Set(stored?.importedPages ?? stored?.paragraphs.map(p => p.page));
-  const layoutPages = new Set(stored?.layoutPages);
+  const layoutPages = new Set(stored?.layoutVersion === LAYOUT_VERSION ? stored.layoutPages : []);
   const replace = new Set();
   for (let page = range.first; page <= range.last; page++) {
     if (!loaded.has(page) || (parsed.layoutVersion && !layoutPages.has(page))) replace.add(page);
@@ -206,6 +206,7 @@ function mergeImport(stored, parsed) {
   ];
   return withKinds({
     ...parsed, range, paragraphs, regions, importedPages: [...loaded], layoutPages: [...layoutPages],
+    layoutVersion: parsed.layoutVersion || (stored?.layoutVersion === LAYOUT_VERSION ? LAYOUT_VERSION : 0),
     lastParagraphId: nextId,
   });
 }
@@ -257,20 +258,24 @@ function pruneTranslations(translations) {
 /**
  * Drop stored answers with missing mathematical spans or incomplete prose so
  * the next translation pass rewrites them.
- * @returns how many entries were dropped.
+ * @returns how many entries were dropped or normalized.
  */
 function pruneSuspicious(document, translations) {
   const byId = new Map(document.paragraphs.map(paragraph => [String(paragraph.id), paragraph]));
-  let removed = 0;
+  let changed = 0;
   for (const [id, value] of Object.entries(translations)) {
     const paragraph = byId.get(id);
-    if (paragraph && (!looksComplete(paragraph.text, value) ||
-        paragraph.mathSpans?.some(({ start, end }) => !value.includes(paragraph.text.slice(start, end))))) {
+    if (!paragraph) continue;
+    const checked = validateTranslation(paragraph, value);
+    if (checked.text === undefined) {
       delete translations[id];
-      removed += 1;
+      changed += 1;
+    } else if (checked.text !== value) {
+      translations[id] = checked.text;
+      changed += 1;
     }
   }
-  return removed;
+  return changed;
 }
 
 function assertOrigin(request) {
@@ -302,7 +307,7 @@ export function createReader(ctx, root) {
   const questions = new Map();
   const mutations = new Set();
   const lifetime = new AbortController();
-  let modelTail = Promise.resolve();
+  const enqueueModel = createRequestQueue(2);
 
   const settingsPath = join(dirname(root), 'settings.json');
   let catalogue = { at: 0, value: null };
@@ -346,12 +351,10 @@ export function createReader(ctx, root) {
   }
 
   function modelTask(task, signal) {
-    const next = modelTail.then(() => {
+    return enqueueModel(() => waitForTask(Promise.resolve().then(() => {
       signal.throwIfAborted();
       return task();
-    });
-    modelTail = next.catch(() => {});
-    return waitForTask(next, signal);
+    }), signal), signal);
   }
 
   function assertIdle(id) {
@@ -409,7 +412,7 @@ export function createReader(ctx, root) {
     return {
       ...document, translations: activeTranslations, history, translated: translatedCount, expected: translatable.length,
       status: translatable.length === translatedCount ? 'complete' : job?.status ?? 'pending',
-      error: job?.error ?? '',
+      error: job?.error ?? '', failedParagraphs: job?.failures ?? [],
     };
   }
 
@@ -430,59 +433,25 @@ export function createReader(ctx, root) {
         const droppedEmpty = pruneTranslations(translations);
         const droppedSuspicious = pruneSuspicious(document, translations);
         if (droppedEmpty || droppedSuspicious) await saveJson(path, translations);
-        if (!translationBatch(document.paragraphs, translations).length) return;
-        signal.throwIfAborted();
+        if (!document.paragraphs.some(p => isTranslatable(p.kind) && !Object.hasOwn(translations, p.id))) return;
         const route = await waitForTask(routeFor(ctx.llm, await readSettings(), signal), signal);
-        let stalls = 0;
-        const limit = document.paragraphs.length * 2 + 50;
-        for (let round = 0; round < limit; round++) {
-          let batch = translationBatch(document.paragraphs, translations);
-          if (!batch.length) return;
-          let saved = 0;
-          // Models occasionally wrap, truncate or number their JSON. Retry with
-          // a smaller batch instead of failing the whole paper; every accepted
-          // paragraph is already on disk, so the next round only asks for what
-          // is still missing.
-          for (let attempt = 0; attempt < 3 && !saved; attempt++) {
-            const tokensById = new Map();
-            const items = batch.map(paragraph => {
-              const { text, tokens } = protectMath(paragraph.text, paragraph.mathSpans, paragraph.id);
-              tokensById.set(paragraph.id, tokens);
-              return { id: paragraph.id, text };
-            });
-            const input = { title: document.title, paragraphs: items };
-            const { text } = await modelTask(() =>
-              complete(ctx.llm, route, TRANSLATION_PROMPT, input, 6500, signal), signal);
-            signal.throwIfAborted();
-            const result = parseTranslations(text, items);
-            const sources = new Map(batch.map(paragraph => [paragraph.id, paragraph.text]));
-            const accepted = [];
-            for (const [paragraphId, value] of result.values) {
-              const tokens = tokensById.get(paragraphId) ?? [];
-              const source = sources.get(paragraphId) ?? '';
-              const restored = restoreMath(value, tokens);
-              if (restored !== null && (looksComplete(source, restored) || attempt >= 2)) {
-                accepted.push([paragraphId, restored]);
-                continue;
-              }
-              // Two strict attempts already failed for this batch; a third
-              // tolerant restore keeps the paper moving instead of erroring out.
-              if (attempt < 2) continue;
-              const tolerant = restoreMathTolerant(value, tokens);
-              if (tolerant) accepted.push([paragraphId, tolerant]);
-            }
-            for (const [paragraphId, value] of accepted) translations[paragraphId] = value;
-            saved = accepted.length;
-            if (saved) await saveJson(path, translations);
-            else batch = batch.slice(0, Math.max(1, Math.ceil(batch.length / 2)));
+        const request = async (system, data, maxTokens) => {
+          const run = () => modelTask(() => complete(ctx.llm, route, system, data, maxTokens, signal), signal);
+          try { return await run(); }
+          catch (error) {
+            if (error?.code !== 'RATE_LIMIT') throw error;
+            await delay(750, undefined, { signal });
+            return run();
           }
-          if (saved) stalls = 0;
-          else if (++stalls >= 2) {
-            throw new ReaderError('模型连续返回无法解析的译文。已保存的进度可以继续。', 502);
-          }
+        };
+        job.failures = await translateDocument({
+          document, translations, request, signal,
+          save: () => saveJson(path, translations),
+        });
+        if (job.failures.length) {
+          job.status = 'error';
+          job.error = `${job.failures.length} 段未完成，其他译文已保存。可查看下方原因并继续翻译。`;
         }
-        // Every round saved at least one paragraph but the paper never finished.
-        throw new ReaderError('全文翻译未能在预期轮次内完成。已保存的进度可以继续。', 502);
       } catch (error) {
         if (signal.aborted) return;
         if (!(error instanceof ReaderError)) {

@@ -1,13 +1,12 @@
-import { isTranslatable } from './classify.js';
-
 const PROVIDER = 'deepseek-account';
 const MAX_TRANSLATION_LENGTH = 12_000;
 const MAX_MODEL_OUTPUT = 60_000;
 
 export class ReaderError extends Error {
-  constructor(message, status = 400) {
+  constructor(message, status = 400, code) {
     super(message);
     this.status = status;
+    if (code) this.code = code;
   }
 }
 
@@ -56,9 +55,16 @@ export async function routeFor(llm, preference, signal) {
 
 
 export async function complete(llm, route, system, data, maxTokens, signal) {
+  signal.throwIfAborted();
   const active = AbortSignal.any([signal, AbortSignal.timeout(150_000)]);
   const blocks = new Map();
+  let size = 0;
   let finished = false;
+  const setBlock = (index, value) => {
+    size += value.length - (blocks.get(index)?.length ?? 0);
+    if (size > MAX_MODEL_OUTPUT) throw new ReaderError('模型输出过长。请重试当前操作。', 502, 'OUTPUT_LIMIT');
+    blocks.set(index, value);
+  };
   try {
     const stream = llm.stream({
       ...route,
@@ -74,10 +80,10 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
         throw new ReaderError('模型返回了工具调用。请重试当前操作。', 502);
       }
       if (event.type === 'text-delta') {
-        blocks.set(event.index, (blocks.get(event.index) ?? '') + event.text);
+        setBlock(event.index, (blocks.get(event.index) ?? '') + event.text);
       }
       if (event.type === 'block-end' && event.block?.type === 'text') {
-        blocks.set(event.index, event.block.text);
+        setBlock(event.index, event.block.text);
       }
       if (event.type === 'finish') {
         if (event.reason?.kind === 'error') {
@@ -88,8 +94,7 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
       }
     }
     const text = [...blocks].sort(([a], [b]) => a - b).map(([, value]) => value).join('').trim();
-    if (!text) throw new ReaderError('模型没有返回内容。请重试当前操作。', 502);
-    if (text.length > MAX_MODEL_OUTPUT) throw new ReaderError('模型输出过长。请重试当前操作。', 502);
+    if (!text) throw new ReaderError('模型没有返回内容。请重试当前操作。', 502, 'NO_CONTENT');
     // A truncated answer still carries usable translation pairs: the reader
     // salvages them and continues with the remainder instead of failing.
     return { text, finished };
@@ -97,12 +102,13 @@ export async function complete(llm, route, system, data, maxTokens, signal) {
     if (error instanceof ReaderError) throw error;
     const code = error?.code ?? error?.failure?.code;
     if (code === 'ACCOUNT_SIGN_IN_REQUIRED' || code === 'ACCOUNT_TOKEN_INVALID' || code === 'AUTH') {
-      throw new ReaderError('DeepSeek 账号会话不可用。请在 Harness 中重新登录。', 401);
+      throw new ReaderError('DeepSeek 账号会话不可用。请在 Harness 中重新登录。', 401, 'AUTH');
     }
     if (/QUOTA|RATE_LIMIT/.test(code ?? '')) {
-      throw new ReaderError('账号额度不足或请求频率受限。请稍后继续。', 429);
+      throw new ReaderError('账号额度不足或请求频率受限。请稍后继续。', 429, /QUOTA/.test(code) ? 'QUOTA' : 'RATE_LIMIT');
     }
-    throw new ReaderError(active.aborted ? '模型请求已停止或超时。' : 'DeepSeek 账号模型暂时不可用。', 502);
+    throw new ReaderError(active.aborted ? '模型请求已停止或超时。' : 'DeepSeek 账号模型暂时不可用。', 502,
+      active.aborted ? 'ABORTED' : 'NETWORK');
   }
 }
 
@@ -146,6 +152,7 @@ const INLINE_MATH = [
   new RegExp(String.raw`\$${ATOM}(?:\s*${OPERATOR}\s*${ATOM})*\$`, 'gu'),
   new RegExp(String.raw`${LEFT_BOUNDARY}${ATOM}(?:[ \t]*${OPERATOR}[ \t]*${ATOM})+${RIGHT_BOUNDARY}`, 'gu'),
   new RegExp(String.raw`${LEFT_BOUNDARY}(?:${FUNCTION}|${VARIABLE}\d*${INDEX}+|(?<!['’])[B-HJ-Zb-z]\d*)${RIGHT_BOUNDARY}`, 'gu'),
+  new RegExp(String.raw`${LEFT_BOUNDARY}[A-Za-z0-9_]*[${MATH_LETTERS}][A-Za-z0-9_${MATH_LETTERS}]*(?:${INDEX})*${RIGHT_BOUNDARY}`, 'gu'),
   /(?<=\b(?:let|denote|matrix|variable|parameter|operator|set|vector)\s+)[aAI](?![A-Za-z0-9_])/gi,
   new RegExp(String.raw`[${MATH_LETTERS}${SCRIPT_CHARS}∀∃¬∈∉⊂⊃⊆⊇≤≥≈≠∑∏∫√∞∂∇∥∪∩×÷±−→←↔⇒⇔]+`, 'gu'),
 ];
@@ -154,17 +161,31 @@ const INLINE_MATH = [
 // plain fonts and older imports that lack layout metadata.
 export function protectMath(text, spans = [], paragraphId = 0) {
   const source = String(text ?? '');
-  const ranges = [...spans];
+  const ranges = spans.map(({ start, end }) => {
+    // A PDF may emit a variable or acronym as several styled runs.
+    if (/[A-Za-z0-9_]/.test(source.charAt(start))) {
+      while (/[A-Za-z0-9_]/.test(source.charAt(start - 1))) start--;
+    }
+    if (/[A-Za-z0-9_]/.test(source.charAt(end - 1))) {
+      while (/[A-Za-z0-9_]/.test(source.charAt(end))) end++;
+    }
+    return { start, end };
+  });
+  const abbreviations = [...source.matchAll(/\b(?:e\.g|i\.e)\./gi)];
   for (const pattern of INLINE_MATH) {
     for (const match of source.matchAll(pattern)) {
-      ranges.push({ start: match.index, end: match.index + match[0].length });
+      const start = match.index;
+      const end = start + match[0].length;
+      if (!abbreviations.some(value => start >= value.index && end <= value.index + value[0].length)) ranges.push({ start, end });
     }
   }
   ranges.sort((a, b) => a.start - b.start || b.end - a.end);
   const merged = [];
   for (const { start, end } of ranges) {
     const previous = merged.at(-1);
-    if (previous && start < previous.end) previous.end = Math.max(previous.end, end);
+    const adjacentMath = previous && !/[\[⟦]/.test(source[start]) && !/[\[⟦]/.test(source[previous.start]) &&
+      /^[ \t]*$/.test(source.slice(previous.end, start));
+    if (previous && (start < previous.end || adjacentMath)) previous.end = Math.max(previous.end, end);
     else merged.push({ start, end });
   }
   let prefix = 'M';
@@ -192,18 +213,65 @@ export function restoreMath(text, tokens) {
   return valid && index === tokens.length ? restored : null;
 }
 
-/**
- * Best-effort restore for answers that rewrote a marker (wrong order, missing
- * closing bracket, dropped marker). Surviving markers are still substituted and
- * leftovers removed, so one model hiccup cannot fail the whole paper.
- */
+const MARKER_START = String.raw`(?:⟦|【|［|\[\[?)[ \t]*[MmＭｍ]+[ \t]*[:：]`;
+const MARKER_FIELDS = String.raw`[ \t]*[0-9０-９]+[ \t]*[:：][ \t]*[0-9０-９]+(?![0-9０-９:：])`;
+const MARKER_END = String.raw`(?:[ \t]*(?:⟧|】|］|\]\]?)|(?=$|[\s\p{Script=Han}\p{P}]))`;
+const MARKER_PREFIX = new RegExp(MARKER_START, 'u');
+const MARKER_PARTS = /([MmＭｍ]+)\s*[:：]\s*([0-9０-９]+)\s*[:：]\s*([0-9０-９]+)/u;
+const escapePattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function literalMathPattern(value) {
+  const standalone = /^[A-Za-z0-9_\p{Script=Greek}]+$/u.test(value);
+  const left = standalone ? String.raw`(?<![A-Za-z0-9_\p{Script=Greek}])` : '';
+  const right = standalone ? String.raw`(?![A-Za-z0-9_^\p{Script=Greek}${SCRIPT_CHARS}]|\.\d)`
+    : /[0-9]$/.test(value) ? String.raw`(?![0-9]|\.\d)` : '';
+  return `${left}${escapePattern(value)}${right}`;
+}
+
+// Marker IDs must match the requested order. Already-restored formulas can
+// follow the word order of the translation, with the same exact multiplicity.
 export function restoreMathTolerant(text, tokens) {
-  const byMarker = new Map(tokens.map(token => [token.marker, token.value]));
-  let output = String(text ?? '');
-  for (const [marker, value] of byMarker) output = output.split(marker).join(value);
-  // Remove only leftovers that still look like our id/index markers; the broad
-  // MATH_MARKER regex would swallow the words that follow a broken marker.
-  return output.replace(/⟦M+:[0-9:]+⟧?/g, '').trim();
+  const input = String(text ?? '');
+  const literals = new Set(tokens.map(token => token.value));
+  const alternatives = [...literals].sort((a, b) => b.length - a.length).map(literalMathPattern);
+  const markers = new Map(tokens.map(token => [token.marker, token]));
+  const occurrences = new RegExp([`${MARKER_START}${MARKER_FIELDS}${MARKER_END}`, ...alternatives].join('|'), 'gu');
+  const found = [];
+  let hasMarkers = false;
+  let cursor = 0;
+  let restored = '';
+  for (const match of input.matchAll(occurrences)) {
+    const preceding = input.slice(cursor, match.index);
+    if (MARKER_PREFIX.test(preceding)) return null;
+    const parts = MARKER_PREFIX.test(match[0]) ? match[0].match(MARKER_PARTS) : null;
+    const marker = parts && `⟦${parts[1].normalize('NFKC').toUpperCase()}:${parts[2].normalize('NFKC')}:${parts[3].normalize('NFKC')}⟧`;
+    const token = markers.get(marker);
+    if (!token && !literals.has(match[0])) return null;
+    hasMarkers ||= Boolean(token);
+    found.push(token ?? { value: match[0] });
+    restored += preceding + (token?.value ?? match[0]);
+    cursor = match.index + match[0].length;
+  }
+  const remaining = input.slice(cursor);
+  if (found.length !== tokens.length || MARKER_PREFIX.test(remaining)) return null;
+  if (hasMarkers) {
+    if (!found.every((token, index) => token.marker ? token.marker === tokens[index].marker : token.value === tokens[index].value)) return null;
+  } else {
+    const counts = new Map();
+    for (const { value } of tokens) counts.set(value, (counts.get(value) ?? 0) + 1);
+    for (const { value } of found) {
+      if (!counts.get(value)) return null;
+      counts.set(value, counts.get(value) - 1);
+    }
+  }
+  return restored + remaining;
+}
+
+function sentenceCount(text) {
+  const prose = text.replace(/\([^()]*\)|（[^（）]*）/g, '')
+    .replace(/\b(?:et\s+al|e\.g|i\.e|figs?|eqs?|secs?|refs?|pp?|vs|cf|no|vol|dr|mr|ms)\.(?=\s*\S)/gi, '')
+    .replace(/\b(?:[A-Za-z]\.){2,}(?=\s*\S)|\b[A-Z]\.(?=\s+[A-Z][a-z])/g, '');
+  return (prose.match(/[。！？]+|[.!?]+(?=["'”’\])]*(?:\s|$|\p{Script=Han}))/gu) ?? []).length;
 }
 
 // A translation that keeps far fewer sentences than the source has almost
@@ -215,8 +283,8 @@ export function looksComplete(source, translated) {
   // A clipped answer often starts mid-formula ("= 1 e− 4}。…") while its source
   // starts with a word; identical leading symbols are legitimate.
   if (/^[=,;:.)\]}】]/.test(out) && !/^[=,;:.)\]}】]/.test(src)) return false;
-  const sentences = (src.match(/[.!?](?=\s|$)/g) ?? []).length;
-  const target = (out.match(/[。！？]/g) ?? []).length;
+  const sentences = sentenceCount(src);
+  const target = sentenceCount(out);
   // A concise Chinese answer keeps the source's sentence count even when its
   // character count is well below a quarter of the English text.
   if (sentences >= 2 && target >= Math.max(1, Math.ceil(sentences * 0.6))) return true;
@@ -231,22 +299,67 @@ export function looksComplete(source, translated) {
   return target >= Math.max(1, Math.ceil(sentences * 0.6));
 }
 
-export function translationBatch(paragraphs, translations) {
-  const result = [];
-  let chars = 0;
-  for (const paragraph of paragraphs) {
-    if (!isTranslatable(paragraph.kind)) continue;
-    if (Object.hasOwn(translations, paragraph.id)) continue;
-    if (result.length && (chars + paragraph.text.length > BATCH_CHARS || result.length >= BATCH_PARAGRAPHS)) break;
-    const { id, text, mathSpans } = paragraph;
-    result.push({ id, text, ...(mathSpans ? { mathSpans } : {}) });
-    chars += paragraph.text.length;
+function isRefusal(text) {
+  return /^(?:(?:抱歉|对不起|很抱歉)[，,。]|我(?:无法|不能|不会)(?:翻译|完成|处理)|(?:I'm sorry|I (?:cannot|can't) translate)\b)/iu.test(text.trim());
+}
+
+export function validateTranslation(paragraph, value, tokens) {
+  if (typeof value !== 'string' || !value.trim()) return { reason: 'missing' };
+  if (value.length > MAX_TRANSLATION_LENGTH || value.includes('\uFFFD') || isRefusal(value)) return { reason: 'invalid' };
+  const math = tokens ?? protectMath(paragraph.text, paragraph.mathSpans, paragraph.id).tokens;
+  const restored = restoreMathTolerant(value, math);
+  if (restored === null) return { reason: 'math' };
+  const text = restored.trim();
+  if (text.length > MAX_TRANSLATION_LENGTH || text.includes('\uFFFD')) return { reason: 'invalid' };
+  if (restored !== value && restoreMathTolerant(text, math) === null) return { reason: 'math' };
+  if (!looksComplete(paragraph.text, text)) return { reason: 'incomplete' };
+  return { text };
+}
+
+export function translationFragments(paragraph) {
+  const { text, tokens } = protectMath(paragraph.text, paragraph.mathSpans, paragraph.id);
+  const paragraphs = [];
+  const sequence = [];
+  const addProse = value => {
+    const prose = value.trim();
+    if (!/[A-Za-z]/.test(prose)) {
+      sequence.push(value);
+      return;
+    }
+    const id = paragraphs.length + 1;
+    paragraphs.push({ id, text: prose });
+    sequence.push(value.slice(0, value.length - value.trimStart().length), id, value.slice(value.trimEnd().length));
+  };
+  if (tokens.length) {
+    let cursor = 0;
+    for (const token of tokens) {
+      const next = text.indexOf(token.marker, cursor);
+      addProse(text.slice(cursor, next));
+      sequence.push(token.value);
+      cursor = next + token.marker.length;
+    }
+    addProse(text.slice(cursor));
+  } else {
+    const segments = [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(text)];
+    if (segments.length > 1) for (const { segment } of segments) addProse(segment);
   }
-  return result;
+  const prompt = '把 paragraphs 中的各个片段完整翻译为简体中文。context 是原段落，仅用于理解上下文。片段可能是一个句子的局部，只译该片段，勿补充相邻片段、公式或引文。只返回一个 JSON 对象，键为 id，值为该片段的译文。';
+  return { paragraphs, sequence, prompt, data: { context: paragraph.text, paragraphs } };
+}
+
+export function assembleFragments(paragraph, fragments, values) {
+  for (const part of fragments.paragraphs) {
+    const value = values.get(part.id);
+    if (typeof value !== 'string' || !value.trim()) return { reason: 'missing' };
+    if (isRefusal(value)) return { reason: 'invalid' };
+    if (!looksComplete(part.text, value)) return { reason: 'incomplete' };
+  }
+  const text = fragments.sequence.map(part => typeof part === 'number' ? values.get(part).trim() : part).join('');
+  return validateTranslation(paragraph, text);
 }
 
 function firstJsonSpan(text) {
-  const start = text.search(/[\[{]/);
+  const start = text.search(/\{(?=\s*(?:["}]|\d+\s*:))|\[(?=\s*["{[\]])/);
   if (start < 0) return '';
   const open = text[start];
   const close = open === '{' ? '}' : ']';
@@ -430,12 +543,16 @@ function salvagePairs(text) {
 }
 
 // Last resort for models that answer with a numbered list instead of JSON.
-function lineTranslations(text) {
+function lineTranslations(text, finished) {
   const values = new Map();
-  const lines = text.matchAll(/^\s*(\d{1,6})\s*[.、:：)]\s*(.+?)\s*$/gm);
-  for (const line of lines) {
+  const lines = [...text.matchAll(/^[ \t]*(\d{1,6})[ \t]*[.、:：)][ \t]*/gm)];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const id = Number(line[1]);
-    if (id > 0 && !values.has(id)) values.set(id, line[2]);
+    const next = lines[index + 1];
+    // The final item lacks an end delimiter. Keep its ID for alignment checks.
+    const translation = finished || next ? text.slice(line.index + line[0].length, next?.index).trim() : '';
+    if (id > 0 && !values.has(id)) values.set(id, translation);
   }
   return values;
 }
@@ -447,17 +564,29 @@ function lineTranslations(text) {
  * numbering, truncated objects and numbered lists. Values are only returned for
  * requested paragraph ids, so a partially usable answer still saves progress.
  */
-export function parseTranslations(output, batch) {
+export function parseTranslations(output, batch, { allowPlainText = false, finished = true } = {}) {
   const text = String(output ?? '').replace(/\r\n?/g, '\n');
   const parsed = parseJson(text);
   let entries;
   if (parsed === undefined) {
     entries = salvagePairs(firstJsonSpan(text));
-    if (!entries.size) entries = lineTranslations(text);
+    if (!entries.size) entries = lineTranslations(text, finished);
   } else {
     entries = collectTranslations(parsed, batch);
   }
   const values = alignTranslations(entries, batch, parsed !== undefined);
+  if (finished && allowPlainText && batch.length === 1 && !values.size && !entries.size) {
+    let candidate = '';
+    if (typeof parsed === 'string') candidate = parsed;
+    else if (parsed && !Array.isArray(parsed) && Object.keys(parsed).length === 1) candidate = valueText(parsed);
+    else if (parsed === undefined && !/^\s*[{"`]/.test(text) && !firstJsonSpan(text) &&
+        (!/^\s*\[/.test(text) || /^\s*\[\s*\d+(?:\s*[,;，–-]\s*\d+)*\s*\]/.test(text))) candidate = text;
+    candidate = candidate.trim().replace(/^(?:译文|翻译结果|简体中文译文|(?:以下是|这是)[^\r\n：:]{0,24}(?:译文|翻译(?:结果)?))[：:]\s*/, '');
+    if (candidate.length <= MAX_TRANSLATION_LENGTH && !candidate.includes('\uFFFD') && /\p{Script=Han}/u.test(candidate) &&
+        !isRefusal(candidate) && !/^(?:无法翻译|好的[，。]|当然[，。])/u.test(candidate)) {
+      values.set(batch[0].id, candidate);
+    }
+  }
   const missing = batch.filter(paragraph => !values.has(paragraph.id)).map(paragraph => paragraph.id);
   return { values, missing };
 }

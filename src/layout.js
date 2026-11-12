@@ -392,6 +392,42 @@ function orderLines(lines, gutter, pageWidth, typical, pageNumber) {
   return ordered;
 }
 
+function sameTextStyle(first, second) {
+  return Math.abs(first.size - second.size) <= Math.max(first.size, second.size) * .12
+    && first.bold === second.bold && first.italic === second.italic && first.fontFamily === second.fontFamily;
+}
+
+function rejoinJustifiedRows(rows, gutter, regions) {
+  return rows.flatMap((row, index) => {
+    const groups = [];
+    for (const line of row) {
+      const group = groups.at(-1);
+      const previous = group?.at(-1);
+      const gap = previous && line.box[0] - previous.box[2];
+      const crossesGutter = gutter !== null && previous && center(previous.box) < gutter && center(line.box) >= gutter;
+      if (previous && !crossesGutter && !previous.region && !line.region
+          && !previous.mathSpans.length && !line.mathSpans.length && sameTextStyle(previous, line)
+          && gap >= 0 && gap <= Math.min(previous.size, line.size) * 1.1) {
+        group.push(line);
+      } else {
+        groups.push([line]);
+      }
+    }
+    return groups.flatMap(group => {
+      if (group.length < 3) return group;
+      const text = group.map(line => line.text).join(' ');
+      if ((text.match(/[A-Za-z]{3,}/g)?.length ?? 0) < 3) return group;
+      const joined = { ...group[0], text, box: group.map(line => line.box).reduce(union) };
+      if (regions.some(({ box }) => overlaps(joined.box, box, .25))) return group;
+      // Justification can put a full em between words. An aligned continuation
+      // distinguishes those runs from separate labels on the same baseline.
+      const continuation = rows.slice(index + 1, index + 3).some(nextRow => nextRow.some(line =>
+        (line.text.match(/[A-Za-z]{3,}/g)?.length ?? 0) >= 4 && joinLines(joined, line, [joined])));
+      return continuation ? [joined] : group;
+    });
+  });
+}
+
 function joinLines(previous, line, block) {
   const dy = line.baseline - previous.baseline;
   const size = Math.max(previous.size, line.size);
@@ -401,8 +437,7 @@ function joinLines(previous, line, block) {
   const indent = block.length === 1 && LIST_ITEM.test(previous.text) ? size * 2.4 : size * .8;
   return !line.region && !previous.region && line.mathRatio < .62 && previous.mathRatio < .62
     && dy > size * .52 && dy < size * 1.61 && dx > -size * 2.3 && dx < indent
-    && Math.abs(line.size - previous.size) <= size * .12
-    && line.bold === previous.bold && line.italic === previous.italic && line.fontFamily === previous.fontFamily
+    && sameTextStyle(previous, line)
     && shared > Math.min(width(line.box), width(previous.box)) * .52
     && !CAPTION.test(line.text) && !NEW_BLOCK.test(line.text)
     && !(shortLine && /[.!?。！？]$/.test(previous.text));
@@ -463,11 +498,13 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   const { figures, rules } = detectGraphics(pdfjs, viewport, operators);
   const tables = tableBoxes(rows, rules, viewport, typical);
   const regions = regionsFor(figures, tables, viewport, typical);
-  const lines = rows.flat().filter(line => area(normalize(line.box)) > 0);
+  const validRows = rows.map(row => row.filter(line => area(normalize(line.box)) > 0));
+  const lines = validRows.flat();
   for (const line of lines) {
     if (!CAPTION.test(line.text)) line.region = regions.find(({ box }) => overlaps(line.box, box));
   }
   const gutter = findGutter(lines, viewport.width, typical);
-  const paragraphs = assembleParagraphs(orderLines(lines, gutter, viewport.width, typical, number), viewport, number, normalize);
+  const joined = rejoinJustifiedRows(validRows, gutter, regions);
+  const paragraphs = assembleParagraphs(orderLines(joined, gutter, viewport.width, typical, number), viewport, number, normalize);
   return { paragraphs, regions: regions.map(({ kind, box }) => ({ kind, box: normalize(box) })) };
 }

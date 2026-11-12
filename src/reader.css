@@ -1,4 +1,5 @@
 .qr-reader {
+  --qr-translation-font: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "DengXian", sans-serif;
   height: 100%;
   overflow: auto;
   padding: 24px;
@@ -53,9 +54,14 @@
 .qr-reflow-select[aria-pressed="true"] { outline: 1px solid #9a854e; }
 .qr-pair .qr-en { margin: 0; line-height: 1.55; color: var(--text-secondary, #666); }
 .qr-pair .qr-zh { margin: 0; line-height: 1.8; }
+.qr-pair .qr-zh, .qr-selected-text .qr-spread p + p {
+  font-family: var(--qr-translation-font);
+  font-weight: 600;
+  color: var(--text-primary, CanvasText);
+}
 .qr-pair.heading .qr-en, .qr-pair.heading .qr-zh { font-weight: 700; font-size: 1.15em; }
-.qr-pair.caption .qr-en, .qr-pair.caption .qr-zh { font-size: .85em; color: var(--text-secondary, #666); }
-.qr-pending { color: var(--text-secondary, GrayText); font-style: italic; }
+.qr-pair.caption .qr-en, .qr-pair.caption .qr-zh { font-size: .85em; }
+.qr-pair .qr-zh.qr-pending { color: var(--text-secondary, GrayText); font-weight: 400; font-style: italic; }
 .qr-reflow-formula { margin: 0; padding: 4px 8px; border-radius: 4px; background: color-mix(in srgb, CanvasText 6%, transparent); font-family: "Cambria Math", "STIX Two Math", serif; white-space: pre-wrap; }
 .qr-zoom { gap: 6px; }
 .qr-zoom button { min-width: 2.2em; }

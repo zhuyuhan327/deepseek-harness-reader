@@ -1,7 +1,6 @@
-const SERIF = '"Times New Roman", "SimSun", "Songti SC", "Noto Serif CJK SC", "Cambria Math", serif';
-const BOLD_SERIF = '"Times New Roman", "Noto Serif CJK SC", "Songti SC", "Microsoft YaHei", "PingFang SC", serif';
-const SANS = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
-const MONO = '"Consolas", "Microsoft YaHei", monospace';
+const CJK_FONTS = '"Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "DengXian"';
+const SANS = `${CJK_FONTS}, sans-serif`;
+const MONO = `"Consolas", "Menlo", "DejaVu Sans Mono", ${CJK_FONTS}, monospace`;
 const CLOSING = /^[，。；：！？、）》】〕」』…,.!?;:%)\]}]/u;
 const OPENING = /[（《【〔「『(\[{]$/u;
 const segments = new Intl.Segmenter('zh', { granularity: 'grapheme' });
@@ -22,11 +21,15 @@ function overlap([al, at, ar, ab], [bl, bt, br, bb]) {
 export function pageOverlays(paragraphs, translations, regions) {
   const candidates = paragraphs.filter(p => isTranslatable(p.kind) && translations[p.id]?.trim());
   const protectedBoxes = protectedAreas(paragraphs, regions);
+  const sourceBoxes = paragraph => paragraph.lines?.length ? paragraph.lines : [paragraph.box];
+  const covered = (boxes, obstacles, minimum) => boxes.every(box =>
+    obstacles.some(obstacle => overlap(box, obstacle) >= area(box) * minimum));
   return candidates.filter(p => {
     const size = area(p.box);
-    return !protectedBoxes.some(box => overlap(p.box, box) >= size * .9)
-      && !candidates.some(q => q !== p && (area(q.box) > size || (area(q.box) === size && q.id < p.id))
-        && overlap(p.box, q.box) > size * .5);
+    const boxes = sourceBoxes(p);
+    return !covered(boxes, protectedBoxes, .9)
+      && !candidates.some(q => q !== p && q.text === p.text && overlap(p.box, q.box) > size * .5
+        && (area(q.box) > size || (area(q.box) === size && q.id < p.id)) && covered(boxes, sourceBoxes(q), .9));
   });
 }
 
@@ -37,19 +40,24 @@ function protectedAreas(paragraphs, regions) {
   ];
 }
 
-function availableBox(source, obstacles) {
-  let box = source;
+function availableBoxes(source, obstacles) {
+  let boxes = [source];
   for (const obstacle of obstacles) {
-    if (!overlap(box, obstacle)) continue;
-    const [l, t, r, b] = box;
-    const [ol, ot, or, ob] = obstacle;
-    const pieces = [[l, t, ol, b], [or, t, r, b], [l, t, r, ot], [l, ob, r, b]]
-      .filter(([x, y, right, bottom]) => right > x && bottom > y)
-      .sort((a, b) => area(b) - area(a));
-    if (!pieces.length) return null;
-    box = pieces[0];
+    const parts = boxes.flatMap(box => {
+      if (!overlap(box, obstacle)) return [box];
+      const [l, t, r, b] = box;
+      const [ol, ot, or, ob] = obstacle;
+      return [[l, t, ol, b], [or, t, r, b], [l, t, r, ot], [l, ob, r, b]].filter(piece => area(piece) > 0);
+    });
+    boxes = [];
+    for (const box of parts.sort((a, b) => area(b) - area(a))) {
+      if (boxes.some(previous => overlap(box, previous) >= area(box))) continue;
+      boxes.push(box);
+      if (boxes.length === 12) break;
+    }
+    if (!boxes.length) break;
   }
-  return box;
+  return boxes;
 }
 
 function translationUnits(text, paragraph, width, height) {
@@ -150,10 +158,10 @@ function fit(ctx, units, paragraph, width, height) {
   const originalSize = style.size || Math.min(h, paragraph.kind === 'heading' ? 16 : 11);
   const leading = Math.max(1.12, Math.min(1.55, (style.lineHeight || originalSize * 1.22) / originalSize));
   const bold = style.bold || paragraph.kind === 'heading';
-  // Chinese translations are far easier to read in a UI sans font; the serif
-  // stack (SimSun/Songti) renders thin and faint at overlay sizes.
+  // 600 selects the bold system face on Windows CJK families with 400 and 700
+  // only, while retaining a semibold face on systems that provide one.
   const family = style.fontFamily === 'monospace' ? MONO : SANS;
-  const format = size => `${style.italic ? 'italic ' : ''}${bold ? '700' : '500'} ${size}px ${family}`;
+  const format = size => `${style.italic ? 'italic ' : ''}${bold ? '700' : '600'} ${size}px ${family}`;
   const layoutAt = size => {
     ctx.font = format(size);
     const lines = wrap(ctx, units, w, size);
@@ -196,6 +204,32 @@ function fit(ctx, units, paragraph, width, height) {
   return { ...best, left, top, right, bottom, x, align, firstBaseline };
 }
 
+function placedLines(layout, width, height) {
+  return layout.lines.map((line, index) => {
+    const y = layout.firstBaseline + index * layout.lineHeight;
+    const x = layout.align === 'center' ? layout.x - line.advance / 2 : layout.align === 'right' ? layout.x - line.advance : layout.x;
+    const box = [x / width, (y - layout.ascent) / height, (x + line.advance) / width, (y + layout.descent) / height];
+    return { line, x, y, box };
+  });
+}
+
+function placeTranslation(ctx, units, paragraph, width, height, obstacles) {
+  const measure = box => {
+    const layout = fit(ctx, units, { ...paragraph, box }, width, height);
+    if (!layout) return null;
+    const lines = placedLines(layout, width, height);
+    return lines.some(line => obstacles.some(box => overlap(line.box, box) > 1e-10)) ? null : { layout, lines };
+  };
+  const full = measure(paragraph.box);
+  if (full || !obstacles.length) return full;
+  let best = null;
+  for (const box of availableBoxes(paragraph.box, obstacles)) {
+    const next = measure(box);
+    if (next && (!best || next.layout.size > best.layout.size)) best = next;
+  }
+  return best;
+}
+
 // Both the reading panel and the PDF exporter paint with PDF point coordinates.
 // The source canvas is separate so each repaint starts from the untouched page.
 export function paintTranslation(canvas, source, dimensions, paragraphs, translations, regions = []) {
@@ -207,18 +241,24 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   ctx.save();
   ctx.scale(canvas.width / width, canvas.height / height);
   const protectedBoxes = protectedAreas(paragraphs, regions);
-  const textLines = [];
+  const occupied = [];
+  const placements = [];
   for (const paragraph of pageOverlays(paragraphs, translations, regions)) {
-    const nearby = protectedBoxes.filter(box => overlap(paragraph.box, box) > 0);
-    const box = availableBox(paragraph.box, nearby);
-    if (!box) continue;
     const units = translationUnits(translations[paragraph.id], paragraph, width, height);
-    const layout = fit(ctx, units, { ...paragraph, box }, width, height);
-    if (!layout) continue;
+    const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(paragraph.box, box) > 0);
+    const placement = placeTranslation(ctx, units, paragraph, width, height, nearby);
+    if (!placement) continue;
+    placements.push({ ...placement, paragraph });
+    occupied.push(...placement.lines.map(line => line.box));
+  }
+
+  // Mask all of the source text first. Overlapping source line boxes must not
+  // erase Chinese text drawn for a previous paragraph.
+  for (const { paragraph } of placements) {
+    const [l, t, r, b] = paragraph.box;
+    const padded = [l - .35 / width, t - .28 / height, r + .35 / width, b + .28 / height];
     ctx.save();
-    // A text block can touch the edge of an equation or a table. Mask the source
-    // line by line and leave those regions intact, including their descenders.
-    for (const obstacle of nearby) {
+    for (const obstacle of protectedBoxes.filter(box => overlap(padded, box) > 0)) {
       const [left, top, right, bottom] = pixels(obstacle, width, height);
       ctx.beginPath();
       ctx.rect(0, 0, width, height);
@@ -230,13 +270,16 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       const [left, top, right, bottom] = pixels(lineBox, width, height);
       ctx.fillRect(left - .35, top - .28, right - left + .7, bottom - top + .56);
     }
-    ctx.fillStyle = '#161616';
+    ctx.restore();
+  }
+
+  const textLines = [];
+  ctx.fillStyle = '#000';
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  for (const { paragraph, layout, lines } of placements) {
     ctx.font = layout.font;
-    ctx.textBaseline = 'alphabetic';
-    ctx.textAlign = 'left';
-    layout.lines.forEach((line, index) => {
-      const y = layout.firstBaseline + index * layout.lineHeight;
-      const x = layout.align === 'center' ? layout.x - line.advance / 2 : layout.align === 'right' ? layout.x - line.advance : layout.x;
+    for (const { line, x, y } of lines) {
       let cursor = x;
       for (const item of line.items) {
         if (item.source) {
@@ -250,9 +293,8 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
         }
         cursor += item.advance;
       }
-      textLines.push({ text: line.text, x, y, width: line.advance, size: layout.size });
-    });
-    ctx.restore();
+      textLines.push({ paragraphId: paragraph.id, text: line.text, x, y, width: line.advance, size: layout.size });
+    }
   }
   ctx.restore();
   return textLines;
