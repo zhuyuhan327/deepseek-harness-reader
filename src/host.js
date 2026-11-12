@@ -693,7 +693,7 @@ export function createReader(ctx, root) {
         if (action === 'delete') {
           return json(await mutatePaper(id, async document => {
             try {
-              if (document.workspaceId) await ctx.workspaceRegistry.delete?.(document.workspaceId);
+              if (document.workspaceId) await (ctx.workspaceRegistry.deleteKnown ?? ctx.workspaceRegistry.delete)?.call(ctx.workspaceRegistry, document.workspaceId);
             } catch {
               throw new ReaderError('工作区删除失败，文献文件已保留。请重试。', 502);
             }
