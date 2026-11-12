@@ -542,8 +542,7 @@ export function createReader(ctx, root) {
       let path = directory(id);
       const folder = typeof form.get('folder') === 'string' ? form.get('folder').trim() : '';
       if (!storageMap()[id] && folder) {
-        const safe = String(parsed.title || '论文').replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').trim().slice(0, 60) || '文献';
-        path = join(folder, `阅藏-${safe}`);
+        path = folder;
         await mkdir(path, { recursive: true });
         storageMap()[id] = path;
         saveStorageMap();

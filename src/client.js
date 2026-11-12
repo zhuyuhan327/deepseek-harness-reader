@@ -377,7 +377,18 @@ window.__ModuleLoader__.load({
         const [asking, setAsking] = useState(false);
         const [revision, setRevision] = useState(0);
         const [pending, setPending] = useState(null);
-        const [saveFolder, setSaveFolder] = useState('');
+        const [saveFolder, setSaveFolder] = useState(() => {
+          try { return localStorage.getItem('dsh-quiet-reader:folder') ?? ''; } catch { return ''; }
+        });
+        const chooseFolder = async () => {
+          try {
+            const picked = await ctx.uiWorkspace?.pickDirectory?.();
+            if (!picked) return;
+            setSaveFolder(picked);
+            try { localStorage.setItem('dsh-quiet-reader:folder', picked); } catch {}
+          } catch (e) { setError(e.message); }
+        };
+        const folderPrompted = useRef(false);
         const [fromPage, setFromPage] = useState('');
         const [toPage, setToPage] = useState('');
         const [exportOpen, setExportOpen] = useState(false);
@@ -397,6 +408,15 @@ window.__ModuleLoader__.load({
         const file = useRef(null);
         const active = useRef('');
         active.current = id;
+        useEffect(() => {
+          if (folderPrompted.current || saveFolder || id) return;
+          folderPrompted.current = true;
+          void chooseFolder();
+        }, []);
+        useEffect(() => {
+          if (!saveFolder) return;
+          try { localStorage.setItem('dsh-quiet-reader:folder', saveFolder); } catch {}
+        }, [saveFolder]);
         useEffect(() => () => {
           if (pending) void pending.handle.task.destroy().catch(() => {});
         }, [pending]);
@@ -743,6 +763,10 @@ window.__ModuleLoader__.load({
                   type: 'number', min: 1, max: pending.numPages, value: toPage, 'aria-label': '结束页',
                   onChange: e => setToPage(e.target.value),
                 }), ' 页')),
+            h('div', { className: 'qr-actions' },
+              h('button', { type: 'button', onClick: chooseFolder, disabled: !!busy },
+                saveFolder ? '更改工作文件夹' : '选择工作文件夹'),
+              saveFolder && h('code', { className: 'qr-folder' }, saveFolder)),
             h('p', { className: 'qr-hint' }, `格式：1–${pending.numPages} 的整数，起始页不能大于结束页。`),
             h('div', { className: 'qr-actions' },
               h('button', { type: 'button', className: 'qr-primary', disabled: !!busy, onClick: confirmRange },
