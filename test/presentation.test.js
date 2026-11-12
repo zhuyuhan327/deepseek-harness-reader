@@ -154,3 +154,13 @@ test('与公式重叠的正文仍会输出译文，不再从导出中消失', ()
   assert.equal(lines[0].paragraphId, 1);
   assert.ok(lines.every(line => [line.x, line.y, line.width, line.size].every(Number.isFinite)));
 });
+
+test('拥挤页面把译文放到页面留白区而不是丢弃', () => {
+  const { canvas } = recordingCanvas();
+  const page = { width: 200, height: 200 };
+  const paragraph = { id: 1, kind: 'text', text: 'Crowded source block', box: [0.1, 0.1, 0.2, 0.14], style: { size: 10 } };
+  const blocker = { id: 2, kind: 'formula', text: 'x = y', box: [0, 0, 1, 0.88] };
+  const lines = paintTranslation(canvas, page, page, [paragraph, blocker], { 1: '这是一段较长的中文译文，需要完整显示在页面留白区中。' });
+  assert.ok(lines.length > 0);
+  assert.equal(lines[0].paragraphId, 1);
+});

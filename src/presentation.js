@@ -302,6 +302,25 @@ function placeTranslation(ctx, units, paragraph, dimensions, obstacles, expanded
       const candidate = attempt(box, 4.5);
       if (candidate && (!best || candidate.layout.size > best.layout.size)) best = candidate;
     }
+    // Still nothing next to the source block: fall back to a page-margin band.
+    // Every printed page has a margin, so the translation stays visible instead
+    // of being dropped with a "switch to reflow" notice.
+    const bands = [
+      [.02, .90, .98, .995],
+      [.02, .82, .98, .995],
+      [.02, .74, .98, .995],
+      [.02, .02, .14, .98],
+    ];
+    for (const band of bands) {
+      if (best) break;
+      const candidate = attempt(band, 4.5);
+      if (candidate) best = candidate;
+      if (best) break;
+      for (const box of availableBoxes(band, obstacles)) {
+        const piece = attempt(box, 4.5);
+        if (piece) { best = piece; break; }
+      }
+    }
   }
   return best;
 }
