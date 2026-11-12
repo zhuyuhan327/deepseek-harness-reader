@@ -603,12 +603,12 @@ export function createReader(ctx, root) {
   async function asset(name) {
     if (name === 'reader.css') {
       return new Response(await readFile(new URL('./reader.css', import.meta.url)), {
-        headers: { 'content-type': 'text/css; charset=utf-8', 'x-content-type-options': 'nosniff' },
+        headers: { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
       });
     }
     if (name === 'layout.js' || name === 'presentation.js' || name === 'pdf-export.js') {
       return new Response(await readFile(new URL('./' + name, import.meta.url)), {
-        headers: { 'content-type': 'text/javascript; charset=utf-8', 'x-content-type-options': 'nosniff' },
+        headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
       });
     }
     let library;
@@ -619,7 +619,7 @@ export function createReader(ctx, root) {
     }
     if (name === 'pdf.mjs' || name === 'pdf.worker.mjs') {
       return new Response(await readFile(join(library, 'build', name)), {
-        headers: { 'content-type': 'text/javascript; charset=utf-8', 'x-content-type-options': 'nosniff' },
+        headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
       });
     }
     if (/^standard_fonts\/[A-Za-z0-9_.-]+\.(?:pfb|ttf)$/.test(name)) {
