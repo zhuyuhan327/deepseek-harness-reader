@@ -312,14 +312,23 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   const occupied = [];
   const placements = [];
   for (const paragraph of pageOverlays(paragraphs, translations, regions)) {
-    const neighbors = [...regions.map(region => region.box), ...paragraphs.filter(p => p !== paragraph).map(p => p.box)];
-    const expanded = expandBox(paragraph, neighbors, width, height, bodySize);
-    const units = translationUnits(translations[paragraph.id], paragraph, width, height, neighbors);
-    const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(expanded, box) > 0);
-    const placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize);
-    if (!placement) continue;
-    placements.push({ ...placement, paragraph });
-    occupied.push(...placement.lines.map(line => line.box));
+    // One malformed paragraph (bad box from an upgrade, missing style) must not
+    // abort the whole page or the PDF export.
+    if (!Array.isArray(paragraph.box) || paragraph.box.length !== 4
+        || !paragraph.box.every(Number.isFinite)) continue;
+    try {
+      const neighbors = [...regions.map(region => region.box), ...paragraphs.filter(p => p !== paragraph).map(p => p.box)]
+        .filter(box => Array.isArray(box) && box.length === 4 && box.every(Number.isFinite));
+      const expanded = expandBox(paragraph, neighbors, width, height, bodySize);
+      const units = translationUnits(translations[paragraph.id], paragraph, width, height, neighbors);
+      const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(expanded, box) > 0);
+      const placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize);
+      if (!placement) continue;
+      placements.push({ ...placement, paragraph });
+      occupied.push(...placement.lines.map(line => line.box));
+    } catch {
+      continue;
+    }
   }
 
   // Mask all of the source text first. Overlapping source line boxes must not

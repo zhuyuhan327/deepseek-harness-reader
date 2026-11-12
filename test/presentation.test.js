@@ -108,6 +108,18 @@ test('与其他原文块相交的行内公式改用数学字体绘制', () => {
   assert.match(events.find(event => event.type === 'text' && event.text === 'x').font, /Cambria Math/);
 });
 
+test('版面数据异常的段落不会中断整页绘制', () => {
+  const { canvas, events } = recordingCanvas();
+  const page = { width: 200, height: 200 };
+  const paragraphs = [
+    { id: 1, kind: 'text', text: 'Broken', box: [0.1, 0.1, NaN, 0.2], style: { size: 10 } },
+    { id: 2, kind: 'text', text: 'Fine', box: [0.1, 0.3, 0.6, 0.36], style: { size: 10 } },
+  ];
+  const drawn = paintTranslation(canvas, page, page, paragraphs, { 1: '损坏', 2: '正常' });
+  assert.deepEqual(drawn.map(line => line.paragraphId), [2]);
+  assert.ok(events.some(event => event.type === 'text' && event.text === '正常'));
+});
+
 test('极窄区域也会排版译文并裁剪在本块内，不遮盖相邻内容', () => {
   const { canvas, events } = recordingCanvas();
   const page = { width: 200, height: 200 };
