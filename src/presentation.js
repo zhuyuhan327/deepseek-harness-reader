@@ -357,85 +357,53 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     }
   }
 
-  // Re-flow translated blocks so they never overlap. Blocks whose horizontal
-  // ranges overlap belong to the same flow group (a column, or a full-width
-  // block); inside a group a block keeps its source position and pushes the
-  // following blocks down. A final pass resolves any leftover overlap.
-  const shiftBlock = (item, delta) => {
-    for (const line of item.lines) {
-      line.y += delta;
-      line.box[1] += delta / height;
-      line.box[3] += delta / height;
-    }
-    if (item.frame) {
-      item.frame[1] += delta / height;
-      item.frame[3] += delta / height;
-    }
-  };
-  const extentOf = item => {
-    const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
-    const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
-    return { top: Math.min(...tops), bottom: Math.max(...bottoms) };
-  };
-  const gap = bodySize * .2;
-  const groups = [];
-  for (const item of [...placements].sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1])) {
-    const [left, , right] = item.paragraph.box;
-    const group = groups.find(members => members.some(other => {
-      const [otherLeft, , otherRight] = other.paragraph.box;
-      return Math.min(right, otherRight) - Math.max(left, otherLeft)
-        > Math.min(right - left, otherRight - otherLeft) * .5;
-    }));
-    if (group) group.push(item);
-    else groups.push([item]);
-  }
-  for (const column of groups) {
+  // Re-flow each column so translated blocks never overlap. A block keeps its
+  // source position when it fits; otherwise it is pushed down and the following
+  // blocks follow, exactly like adding space in a document. Only when the whole
+  // column would overflow does the group move up as one unit.
+  for (const side of [0, 1]) {
+    const column = placements
+      .filter(item => ((item.paragraph.box[0] + item.paragraph.box[2]) / 2 < .5) === (side === 0))
+      .sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1]);
     if (column.length < 2) continue;
-    const extents = column.map(extentOf);
+    const gap = bodySize * .2;
+    const extents = column.map(item => {
+      const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
+      const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
+      return { item, top: Math.min(...tops), bottom: Math.max(...bottoms) };
+    });
     const heights = extents.map(extent => extent.bottom - extent.top);
     const sourceTops = column.map(item => item.paragraph.box[1] * height);
     const base = Math.min(...sourceTops);
     const stack = from => {
-      const tops = [];
+      const result = [];
       let cursor = from;
       for (const [index, extent] of extents.entries()) {
-        const top = Math.max(sourceTops[index], cursor);
-        tops.push(top);
+        let top = Math.max(sourceTops[index], cursor);
+        result.push(top);
         cursor = top + heights[index] + gap;
       }
-      return { tops, bottom: cursor - gap };
+      return { tops: result, bottom: cursor - gap };
     };
     let flow = stack(base);
-    const overflow = flow.bottom - height * .995;
-    if (overflow > 0) flow = stack(base - Math.min(overflow, Math.max(0, base - height * .01)));
+    let overflow = flow.bottom - height * .995;
+    if (overflow > 0) {
+      const room = Math.max(0, base - height * .01);
+      flow = stack(base - Math.min(overflow, room));
+    }
     for (const [index, extent] of extents.entries()) {
       const delta = flow.tops[index] - extent.top;
-      if (delta) shiftBlock(column[index], delta);
+      if (!delta) continue;
+      for (const line of extent.item.lines) {
+        line.y += delta;
+        line.box[1] += delta / height;
+        line.box[3] += delta / height;
+      }
+      if (extent.item.frame) {
+        extent.item.frame[1] += delta / height;
+        extent.item.frame[3] += delta / height;
+      }
     }
-  }
-  const ordered = [...placements].sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1]);
-  const settled = [];
-  const overlaps = (a, b) => a.lines.some(lineA => b.lines.some(lineB => {
-    const aTop = lineA.y - (lineA.line.ascent ?? 0);
-    const aBottom = lineA.y + (lineA.line.descent ?? 0);
-    const bTop = lineB.y - (lineB.line.ascent ?? 0);
-    const bBottom = lineB.y + (lineB.line.descent ?? 0);
-    const aLeft = lineA.x;
-    const aRight = lineA.x + lineA.line.advance;
-    const bLeft = lineB.x;
-    const bRight = lineB.x + lineB.line.advance;
-    return aTop < bBottom - .5 && bTop < aBottom - .5 && aLeft < bRight - .5 && bLeft < aRight - .5;
-  }));
-  for (const item of ordered) {
-    for (let guard = 0; guard < 6; guard++) {
-      const hit = settled.filter(other => overlaps(item, other));
-      if (!hit.length) break;
-      const bottom = Math.max(...hit.map(other => Math.max(...other.lines.map(line => line.y + (line.line.descent ?? 0)))));
-      const top = Math.min(...item.lines.map(line => line.y - (line.line.ascent ?? 0)));
-      if (bottom + gap <= top) break;
-      shiftBlock(item, bottom + gap - top);
-    }
-    settled.push(item);
   }
   // Mask all of the source text first. Overlapping source line boxes must not
   // erase Chinese text drawn for a previous paragraph.
