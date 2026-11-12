@@ -353,7 +353,9 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       const expanded = expandBox(paragraph, neighbors, width, height, bodySize);
       const units = translationUnits(translations[paragraph.id], paragraph, width, height, neighbors);
       const nearby = [...protectedBoxes, ...occupied].filter(box => overlap(expanded, box) > 0);
-      const placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize);
+      let placement = placeTranslation(ctx, units, paragraph, dimensions, nearby, expanded, bodySize);
+      // Never leave a translated paragraph unpainted: retry without obstacles.
+      if (!placement) placement = placeTranslation(ctx, units, paragraph, dimensions, [], expanded, bodySize);
       if (!placement) continue;
       placements.push({ ...placement, paragraph });
       occupied.push(...placement.lines.map(line => line.box));

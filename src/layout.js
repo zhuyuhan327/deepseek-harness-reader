@@ -881,7 +881,7 @@ function mergeTextFragments(paragraphs, typical, viewport) {
       const gap = (paragraph.box[1] - previous.box[3]) * viewport.height;
       const shared = Math.min(previous.box[2], paragraph.box[2]) - Math.max(previous.box[0], paragraph.box[0]);
       const narrower = Math.min(previous.box[2] - previous.box[0], paragraph.box[2] - paragraph.box[0]);
-      const joins = shared > narrower * .5 && gap <= typical * 1.6 && gap >= -typical * .5
+      const joins = shared > narrower * .5 && gap <= typical * 1.6 && gap >= -typical * 2
         && /[A-Za-z]{3}/u.test(previousText) && /[A-Za-z]{3}/u.test(text)
         && !/[.!?:]$/.test(previousText) && /^[a-z,;)]/u.test(text)
         && !CAPTION.test(text) && !CAPTION.test(previousText)
