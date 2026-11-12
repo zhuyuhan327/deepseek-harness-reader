@@ -605,10 +605,20 @@ export function createReader(ctx, root) {
       if (error.code === 'ENOENT') return [];
       throw error;
     });
+    let live = null;
+    try {
+      const items = await ctx.workspaceRegistry.list();
+      if (Array.isArray(items) && items.length) live = new Set(items.map(item => String(item.id)));
+    } catch {}
+    const alive = value => !live || !value.workspaceId || live.has(String(value.workspaceId));
     const result = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !ID.test(entry.name)) continue;
       const value = await readJson(join(root, entry.name, 'paper.json'), null);
+      if (value && !alive(value)) {
+        await rm(join(root, entry.name), { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
       if (!value) continue;
       result.push({ id: value.id, title: value.title, workspaceId: value.workspaceId });
     }
