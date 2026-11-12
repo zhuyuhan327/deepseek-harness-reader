@@ -340,7 +340,7 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   const maskPadX = .62;
   const maskPadTop = .86;
   const maskPadBottom = .70;
-  for (const { paragraph } of placements) {
+  for (const { paragraph, frame } of placements) {
     const [l, t, r, b] = paragraph.box;
     const padded = [l - maskPadX / width, t - maskPadTop / height, r + maskPadX / width, b + maskPadBottom / height];
     ctx.save();
@@ -355,6 +355,12 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     for (const lineBox of sourceBoxes(paragraph)) {
       const [left, top, right, bottom] = pixels(lineBox, width, height);
       ctx.fillRect(left - maskPadX, top - maskPadTop, right - left + maskPadX * 2, bottom - top + maskPadTop + maskPadBottom);
+    }
+    // The translation may be laid out in an expanded frame; clear that whole
+    // area too, otherwise the original English stays visible under the text.
+    if (frame) {
+      const [left, top, right, bottom] = pixels(frame, width, height);
+      ctx.fillRect(left - 1, top - 1, right - left + 2, bottom - top + 2);
     }
     ctx.restore();
   }
