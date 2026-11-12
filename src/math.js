@@ -163,6 +163,12 @@ export function validateTranslation(paragraph, value, tokens) {
   return { text };
 }
 
+// Last-resort repair when the model rewrote or dropped math markers: keep the
+// translation text and drop the markers instead of leaving the paragraph
+// untranslated forever.
+export function stripMathMarkers(value) {
+  return String(value ?? '').replace(/⟦[^⟧\r\n]*⟧?/gu, '').replace(/\s{2,}/gu, ' ').trim();
+}
 export function translationFragments(paragraph) {
   const { text, tokens } = protectMath(paragraph.text, paragraph.mathSpans, paragraph.id);
   const paragraphs = [];

@@ -4,6 +4,7 @@ import {
   translationFragments, assembleFragments,
 } from './model.js';
 import { isTranslatable } from './classify.js';
+import { restoreMathTolerant, stripMathMarkers } from './math.js';
 
 // One shared queue bounds translation and question traffic for this reader.
 export function createRequestQueue(concurrency = 2) {
@@ -165,7 +166,7 @@ export async function translateDocument({ document, translations, request, save,
           for (const item of items) {
             const checked = validateTranslation(item.paragraph, result.values.get(item.paragraph.id), item.tokens);
             if (checked.text !== undefined) accepted.push([item, checked.text]);
-            else missing.push({ ...item, reason: checked.reason });
+            else missing.push({ ...item, reason: checked.reason, value: result.values.get(item.paragraph.id) });
           }
           if (accepted.length) await persist(accepted);
           for (const item of missing) pending.push({ ...item, partial: accepted.length > 0 });
@@ -217,7 +218,11 @@ export async function translateDocument({ document, translations, request, save,
         checked = assembleFragments(item.paragraph, fragments, values);
       }
     }
-    if (checked.text !== undefined) await persist([[item, checked.text]]);
+    let accepted = checked.text;
+    if (accepted === undefined && checked.reason === 'math' && typeof item.value === 'string') {
+      accepted = restoreMathTolerant(item.value, item.tokens ?? []) ?? stripMathMarkers(item.value);
+    }
+    if (accepted !== undefined) await persist([[item, accepted]]);
     else for (const { paragraph } of item.group) failures.push({ id: paragraph.id, page: paragraph.page, reason: checked.reason });
   }
   signal.throwIfAborted();
