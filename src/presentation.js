@@ -461,14 +461,6 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     ctx.beginPath();
     ctx.rect(cl - .6, ct - .6, cr - cl + 1.2, cb - ct + 1.2);
     ctx.clip();
-    // Never paint Chinese over formulas, figures or tables that the frame touches.
-    for (const obstacle of protectedBoxes.filter(box => overlap(clip, box) > 0)) {
-      const [left, top, right, bottom] = pixels(obstacle, width, height);
-      ctx.beginPath();
-      ctx.rect(0, 0, width, height);
-      ctx.rect(left, top, right - left, bottom - top);
-      ctx.clip('evenodd');
-    }
     ctx.lineWidth = layout.size * .025;
     for (const { line, x, y } of lines) {
       let cursor = x;
