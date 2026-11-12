@@ -336,6 +336,11 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
   ctx.save();
   ctx.scale(canvas.width / width, canvas.height / height);
   const protectedBoxes = protectedAreas(paragraphs, regions, translations);
+  // Large non-text blocks that translated text must not cover.
+  const largeBox = box => Array.isArray(box) && box.length === 4 && box.every(Number.isFinite)
+    && (box[2] - box[0]) * (box[3] - box[1]) >= .006;
+  const barriers = [...regions.map(region => region.box).filter(largeBox),
+    ...paragraphs.filter(item => !isTranslatable(item.kind) && largeBox(item.box)).map(item => item.box)];
   const occupied = [];
   const placements = [];
   for (const paragraph of pageOverlays(paragraphs, translations, regions)) {
@@ -380,6 +385,20 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       let cursor = from;
       for (const [index, extent] of extents.entries()) {
         let top = Math.max(sourceTops[index], cursor);
+        const [xLeft, , xRight] = column[index].paragraph.box;
+        for (let guard = 0; guard < 6; guard++) {
+          let moved = false;
+          for (const box of barriers) {
+            if (box[2] <= xLeft || box[0] >= xRight) continue;
+            const boxTop = box[1] * height;
+            const boxBottom = box[3] * height;
+            if (top < boxBottom + gap && top + heights[index] > boxTop) {
+              top = boxBottom + gap;
+              moved = true;
+            }
+          }
+          if (!moved) break;
+        }
         result.push(top);
         cursor = top + heights[index] + gap;
       }
