@@ -17,7 +17,7 @@ const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
 const ID = /^[a-f0-9]{64}$/;
 const require = createRequire(import.meta.url);
-const LAYOUT_VERSION = 5;
+const LAYOUT_VERSION = 6;
 
 function validBox(box) {
   return Array.isArray(box) && box.length === 4

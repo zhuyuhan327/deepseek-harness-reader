@@ -35,6 +35,20 @@ function page(items, operators = []) {
   };
 }
 
+test('矢量绘制的图表会被识别为图形区域，图内标签不再视为正文', async () => {
+  const operators = [];
+  for (let index = 0; index < 16; index++) {
+    operators.push([OPS.constructPath, OPS.fill, [], [100 + index * 4, 520 - index * 3, 130 + index * 4, 620 - index * 2]]);
+  }
+  const items = [run('axis label', 150, 200, 60)];
+  const { paragraphs, regions } = await extractPageLayout(pdfjs, page(items, operators), viewport, 2);
+  assert.equal(regions.filter(region => region.kind === 'figure').length >= 1, true);
+  const figure = regions.find(region => region.kind === 'figure');
+  const label = paragraphs.find(paragraph => paragraph.text.includes('axis label'));
+  assert.ok(label);
+  assert.ok(label.box[0] >= figure.box[0] && label.box[2] <= figure.box[2]);
+});
+
 test('连续公式行合并成一个公式块', async () => {
   const items = [
     run('L(θ)', 90, 120, 40, 'math'),

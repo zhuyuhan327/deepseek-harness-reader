@@ -38,6 +38,22 @@ function transformBox(box, [a, b, c, d, e, f]) {
   return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
 }
 
+function clusterInk(boxes, viewport) {
+  const clusters = [];
+  const gapX = viewport.width * .03;
+  for (const box of [...boxes].sort((a, b) => a[1] - b[1] || a[0] - b[0])) {
+    const near = clusters.find(cluster => box[1] <= cluster.box[3] + viewport.height * .02
+      && Math.max(box[0], cluster.box[0]) - Math.min(box[2], cluster.box[2]) <= gapX);
+    if (near) {
+      near.box = union(near.box, box);
+      near.count++;
+    } else {
+      clusters.push({ box, count: 1 });
+    }
+  }
+  return clusters;
+}
+
 function detectGraphics(pdfjs, viewport, operators) {
   const ops = pdfjs.OPS;
   const figures = [];
@@ -48,6 +64,8 @@ function detectGraphics(pdfjs, viewport, operators) {
   let matrix = viewport.transform;
   let clip = bounds;
   let form = null;
+  let pageInk = [];
+  let pagePaths = 0;
   const stack = [];
   const graphicSize = box => width(box) > viewport.width * .025 && height(box) > viewport.height * .018
     && area(box) > area(bounds) * .001 && area(box) < area(bounds) * .84;
@@ -124,6 +142,12 @@ function detectGraphics(pdfjs, viewport, operators) {
         const box = intersect(clip, transformBox(args[2], matrix));
         if (!box) break;
         if (width(box) >= viewport.width * .15 && height(box) < 1.4 && rules.length < 500) rules.push(box);
+        // Charts are often vector art drawn straight on the page (no Form
+        // XObject). Track the non-rule artwork so its labels become a region.
+        if (area(box) < area(bounds) * .84 && width(box) > 1.4 && height(box) > 1.4) {
+          pagePaths++;
+          if (pageInk.length < 4000) pageInk.push(box);
+        }
         for (let group = form; group; group = group.parent) {
           // Ignore page-sized backgrounds when estimating the vector artwork.
           if (area(box) >= area(bounds) * .84) continue;
@@ -132,6 +156,17 @@ function detectGraphics(pdfjs, viewport, operators) {
         }
         break;
       }
+    }
+  }
+  if (pagePaths >= 12) {
+    for (const cluster of clusterInk(pageInk, viewport)) {
+      if (cluster.count < 12 || !graphicSize(cluster.box)) continue;
+      if (width(cluster.box) < viewport.width * .10) continue;
+      // A single artifact spanning most of the page is usually a border or a
+      // background, not a chart; marking it would hide real prose.
+      if (height(cluster.box) > viewport.height * .55) continue;
+      if (area(cluster.box) < area(bounds) * .003) continue;
+      if (figures.length < 500) figures.push(cluster.box);
     }
   }
   return { figures, rules };
@@ -675,6 +710,14 @@ function mergeFragments(left, right, gutter, typical) {
   // A finished sentence followed by a capitalised new block is a real break,
   // even when the two boxes sit close together on one baseline.
   if (gap > typical * .5 && /[.!?]["'”’)]?$/u.test(left.text) && /^[A-Z0-9]/u.test(right.text)) return false;
+  const mathLeft = (left.mathRatio ?? 0) > .5;
+  const mathRight = (right.mathRatio ?? 0) > .5;
+  // Formula cells ("1", "n", "i=1", "Σ") are separate one-glyph lines; join them
+  // back into the single equation they came from.
+  if (mathLeft && mathRight) return gap <= typical * 3.2;
+  // Only formula fragments may bridge a small baseline offset (scripts and
+  // numerator/denominator rows); ordinary prose needs the same baseline.
+  if (Math.abs(right.baseline - left.baseline) > typical * .45 && !(mathLeft || mathRight)) return false;
   return /[A-Za-z]{2}/u.test(left.text) || /[A-Za-z]{2}/u.test(right.text);
 }
 
@@ -711,7 +754,7 @@ function mergeBaselineFragments(lines, gutter, typical) {
     row = [];
   };
   for (const line of sorted) {
-    if (row.length && Math.abs(line.baseline - row[0].baseline) > typical * .45) flush();
+    if (row.length && Math.abs(line.baseline - row[0].baseline) > typical * .8) flush();
     row.push(line);
   }
   flush();
@@ -733,7 +776,27 @@ export async function extractPageLayout(pdfjs, page, viewport, number) {
   const validRows = rows.map(row => row.filter(line => area(normalize(line.box)) > 0));
   const lines = validRows.flat();
   for (const line of lines) {
-    if (!CAPTION.test(line.text)) line.region = regions.find(({ box }) => overlaps(line.box, box));
+    if (CAPTION.test(line.text)) continue;
+    const region = regions.find(({ box }) => overlaps(line.box, box));
+    if (!region) continue;
+    line.region = region;
+    // A caption-free label may straddle the artwork edge; grow the region so the
+    // whole label is covered and no overlay is painted on top of it.
+    region.box = union(region.box, line.box);
+  }
+  // Chart labels (axis names, legends) often sit a few points outside the
+  // vector artwork. Absorb short lines that clearly belong to the figure so
+  // they are not translated as body paragraphs.
+  for (const region of regions) {
+    if (region.kind !== 'figure') continue;
+    for (const line of lines) {
+      if (line.region || CAPTION.test(line.text) || line.text.length > 42) continue;
+      const near = line.box[1] <= region.box[3] + typical * 2.4 && line.box[3] >= region.box[1] - typical * 2.4;
+      const shared = Math.min(line.box[2], region.box[2]) - Math.max(line.box[0], region.box[0]);
+      if (!near || shared < width(line.box) * .5) continue;
+      line.region = region;
+      region.box = union(region.box, line.box);
+    }
   }
   markRunInHeadings(validRows);
   const gutter = findGutter(lines, viewport.width, typical);
