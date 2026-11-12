@@ -357,6 +357,54 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
     }
   }
 
+  // Re-flow each column so translated blocks never overlap. A block keeps its
+  // source position when it fits; otherwise it is pushed down and the following
+  // blocks follow, exactly like adding space in a document. Only when the whole
+  // column would overflow does the group move up as one unit.
+  for (const side of [0, 1]) {
+    const column = placements
+      .filter(item => ((item.paragraph.box[0] + item.paragraph.box[2]) / 2 < .5) === (side === 0))
+      .sort((a, b) => a.paragraph.box[1] - b.paragraph.box[1]);
+    if (column.length < 2) continue;
+    const gap = bodySize * .2;
+    const extents = column.map(item => {
+      const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
+      const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
+      return { item, top: Math.min(...tops), bottom: Math.max(...bottoms) };
+    });
+    const heights = extents.map(extent => extent.bottom - extent.top);
+    const sourceTops = column.map(item => item.paragraph.box[1] * height);
+    const base = Math.min(...sourceTops);
+    const stack = from => {
+      const result = [];
+      let cursor = from;
+      for (const [index, extent] of extents.entries()) {
+        const top = Math.max(sourceTops[index], cursor);
+        result.push(top);
+        cursor = top + heights[index] + gap;
+      }
+      return { tops: result, bottom: cursor - gap };
+    };
+    let flow = stack(base);
+    let overflow = flow.bottom - height * .995;
+    if (overflow > 0) {
+      const room = Math.max(0, base - height * .01);
+      flow = stack(base - Math.min(overflow, room));
+    }
+    for (const [index, extent] of extents.entries()) {
+      const delta = flow.tops[index] - extent.top;
+      if (!delta) continue;
+      for (const line of extent.item.lines) {
+        line.y += delta;
+        line.box[1] += delta / height;
+        line.box[3] += delta / height;
+      }
+      if (extent.item.frame) {
+        extent.item.frame[1] += delta / height;
+        extent.item.frame[3] += delta / height;
+      }
+    }
+  }
   // Mask all of the source text first. Overlapping source line boxes must not
   // erase Chinese text drawn for a previous paragraph.
   const maskPadX = .62;
