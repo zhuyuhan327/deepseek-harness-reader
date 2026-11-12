@@ -424,6 +424,45 @@ export function paintTranslation(canvas, source, dimensions, paragraphs, transla
       }
     }
   }
+  // Final collision pass: margin notes and fragments may still overlap the main
+  // column after the per-column pass. Push the lower block down until the page
+  // has no two translated blocks on top of each other.
+  const extentOf = item => {
+    const tops = item.lines.map(line => line.y - (line.line.ascent ?? 0));
+    const bottoms = item.lines.map(line => line.y + (line.line.descent ?? 0));
+    return { top: Math.min(...tops), bottom: Math.max(...bottoms) };
+  };
+  const shiftBy = (item, delta) => {
+    for (const line of item.lines) {
+      line.y += delta;
+      line.box[1] += delta / height;
+      line.box[3] += delta / height;
+    }
+    if (item.frame) {
+      item.frame[1] += delta / height;
+      item.frame[3] += delta / height;
+    }
+  };
+  const collide = (a, b) => a.lines.some(left => b.lines.some(right => {
+    const topA = left.y - (left.line.ascent ?? 0);
+    const bottomA = left.y + (left.line.descent ?? 0);
+    const topB = right.y - (right.line.ascent ?? 0);
+    const bottomB = right.y + (right.line.descent ?? 0);
+    return topA < bottomB - .5 && topB < bottomA - .5
+      && left.x < right.x + right.line.advance - .5 && right.x < left.x + left.line.advance - .5;
+  }));
+  const settleGap = bodySize * .2;
+  const settledBlocks = [];
+  for (const item of [...placements].sort((a, b) => extentOf(a).top - extentOf(b).top)) {
+    for (let guard = 0; guard < 8; guard++) {
+      const hit = settledBlocks.filter(other => collide(item, other));
+      if (!hit.length) break;
+      const bottom = Math.max(...hit.map(other => extentOf(other).bottom));
+      shiftBy(item, bottom + settleGap - extentOf(item).top);
+    }
+    settledBlocks.push(item);
+  }
+
   // Mask all of the source text first. Overlapping source line boxes must not
   // erase Chinese text drawn for a previous paragraph.
   const maskPadX = .62;
