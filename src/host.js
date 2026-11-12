@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, unlink, writeFile, readdir } from 'node:fs
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   routeFor, complete, ReaderError, QUESTION_PROMPT, selectEvidence, validateTranslation,
@@ -541,17 +541,34 @@ export function createReader(ctx, root) {
     const task = (previous?.catch(() => {}) ?? Promise.resolve()).then(async () => {
       let path = directory(id);
       const folder = typeof form.get('folder') === 'string' ? form.get('folder').trim() : '';
+      let workspaceId = '';
       if (!storageMap()[id] && folder) {
-        path = folder;
+        const safe = String(parsed.title || '论文').replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ').trim().slice(0, 60) || '文献';
+        path = join(folder, safe);
         await mkdir(path, { recursive: true });
         storageMap()[id] = path;
         saveStorageMap();
+        const settings = await readSettings();
+        const live = await ctx.workspaceRegistry.list().catch(() => []);
+        const existing = live.find(item => String(item.id) === String(settings.libraryWorkspace));
+        await saveJson(settingsPath, { ...settings, libraryRoot: folder });
+        workspaceId = existing ? String(existing.id) : '';
       }
       await mkdir(path, { recursive: true });
       const manifest = join(path, 'paper.json');
       const stored = await readJson(manifest, null);
       if (!stored) await writeFile(join(path, 'original.pdf'), pdf);
-      const workspace = await ctx.workspaceRegistry.create(path, stored?.title ?? parsed.title);
+      const workspace = workspaceId
+        ? { id: workspaceId }
+        : await ctx.workspaceRegistry.create(folder || path, stored?.title ?? parsed.title);
+      if (!workspaceId) {
+        const settings = await readSettings();
+        await saveJson(settingsPath, {
+          ...settings,
+          ...(folder ? { libraryRoot: folder } : {}),
+          libraryWorkspace: String(workspace.id),
+        });
+      }
       const document = { ...withKinds(mergeImport(stored, parsed)), id, workspaceId: String(workspace.id) };
       await saveJson(manifest, document);
       // Reopening an imported paper shows its existing progress. Resume is explicit.
