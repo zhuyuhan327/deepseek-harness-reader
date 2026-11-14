@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -599,24 +599,36 @@ export function createReader(ctx, root) {
     return job.task;
   }
 
-  async function asset(name) {
+  // Plugin assets are immutable for a given installed version. Serve them with
+  // validators so repeat opens revalidate cheaply (304) instead of
+  // re-downloading the multi-MB PDF.js worker and fonts on every panel mount.
+  async function serveAsset(path, type, request) {
+    const { mtimeMs } = await stat(path);
+    const lastModified = new Date(Math.floor(mtimeMs / 1000) * 1000).toUTCString();
+    const headers = {
+      'content-type': type,
+      'cache-control': 'no-cache',
+      'last-modified': lastModified,
+      'x-content-type-options': 'nosniff',
+    };
+    if (request?.headers?.get?.('if-modified-since') === lastModified) {
+      return new Response(null, { status: 304, headers });
+    }
+    return new Response(await readFile(path), { headers });
+  }
+
+  async function asset(name, request) {
     if (name === 'reader.css') {
-      return new Response(await readFile(new URL('./reader.css', import.meta.url)), {
-        headers: { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
-      });
+      return await serveAsset(fileURLToPath(new URL('./reader.css', import.meta.url)), 'text/css; charset=utf-8', request);
     }
     if (name === 'layout.js' || name === 'presentation.js' || name === 'pdf-export.js') {
-      return new Response(await readFile(new URL('./' + name, import.meta.url)), {
-        headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
-      });
+      return await serveAsset(fileURLToPath(new URL('./' + name, import.meta.url)), 'text/javascript; charset=utf-8', request);
     }
     // PDF.js is vendored with the plugin, so installation never downloads the
     // 39 MB pdfjs-dist package from the registry.
     const library = fileURLToPath(new URL('./vendor/pdfjs/', import.meta.url));
     if (name === 'pdf.mjs' || name === 'pdf.worker.mjs') {
-      return new Response(await readFile(join(library, 'build', name)), {
-        headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
-      });
+      return await serveAsset(join(library, 'build', name), 'text/javascript; charset=utf-8', request);
     }
     if (/^standard_fonts\/[A-Za-z0-9_.-]+\.(?:pfb|ttf)$/.test(name)) {
       return new Response(await readFile(join(library, name)), {
@@ -640,7 +652,7 @@ export function createReader(ctx, root) {
           return json(selected ? await library.list(await library.required(workspaceId)) : []);
         }
         if (action === 'detail') return json(await detail(await library.required(workspaceId), id));
-        if (action === 'asset') return await asset(searchParams.get('name') ?? '');
+        if (action === 'asset') return await asset(searchParams.get('name') ?? '', request);
         if (action === 'settings') {
           return json({ current: await readSettings(), providers: await modelCatalogue() });
         }

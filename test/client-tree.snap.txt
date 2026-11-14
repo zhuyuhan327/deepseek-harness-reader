@@ -1,0 +1,85 @@
+<main className="qr-reader" role="region" aria-label="阅读模式" lang="zh-CN">
+  <link>
+  <header className="qr-command">
+    <h2 className="qr-title">
+      "阅藏"
+    <span className="qr-badge qr-badge-ok" role="status">
+      "翻译完成"
+    <span className="qr-command-title" title="Snapshot paper">
+      "Snapshot paper"
+    <div className="qr-search">
+      <input aria-label="全文检索" type="search" placeholder="搜索原文或译文…">
+    <div className="qr-command-actions">
+      <label className="qr-picker">
+        "文献"
+        <select aria-label="选择文献" value="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc">
+          <option>
+            "选择文献"
+          <option value="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc">
+            "Snapshot paper"
+      <input type="file" hidden=true>
+      <button className="qr-primary" type="button">
+        "上传 PDF"
+      <button type="button">
+        "设置"
+      <button type="button">
+        "导出 PDF"
+  <section className="qr-workspace-gate">
+    <p role="status">
+      "当前工作区：D:/Papers"
+    <button type="button">
+      "切换工作区"
+  <p className="qr-hint">
+    "上传后会先让你选择页码范围。只翻译所选页的标题、正文与图注，公式与参考文献保持原样。"
+  <div className="qr-body">
+    <div className="qr-reading">
+      <div className="qr-toolbar">
+        <div className="qr-actions" role="group" aria-label="翻页">
+          <button aria-label="上一页" type="button" disabled=true title="上一页（←）">
+            "‹"
+          <label className="qr-range">
+            <input aria-label="页码" type="number" value="1" min="1" max="1">
+            "/ 1"
+          <button aria-label="下一页" type="button" disabled=true title="下一页（→）">
+            "›"
+          <button type="button">
+            "对照模式"
+        <div className="qr-actions qr-zoom" role="group" aria-label="文献缩放">
+          <button aria-label="缩小文献" type="button" title="缩小文献（Ctrl+滚轮）">
+            "−"
+          <output className="qr-zoom-value" aria-live="polite">
+            "100%"
+          <button aria-label="放大文献" type="button" title="放大文献（Ctrl+滚轮）">
+            "＋"
+          <button type="button" disabled=true title="恢复 100%">
+            "重置"
+          <button type="button" title="适应面板宽度">
+            "适宽"
+        <div className="qr-actions" role="status">
+          <span>
+            "全文翻译 1 / 1 段"
+          <progress aria-label="全文翻译进度" value="1" max="1">
+            "1 / 1"
+          <button className="qr-danger" type="button">
+            "清除译文"
+          <button className="qr-danger" type="button">
+            "删除文献"
+      <Pages>
+    <aside className="qr-inspector" aria-label="检查器">
+      <div className="qr-tabs" role="tablist" aria-label="检查器页签">
+        <button className="qr-tab qr-tab-active" role="tab" aria-selected=true type="button" id="qr-tab-paragraph">
+          "段落"
+        <button className="qr-tab" role="tab" type="button" id="qr-tab-chat">
+          "问答"
+        <button className="qr-tab" role="tab" type="button" id="qr-tab-issues">
+          "问题"
+      <section className="qr-pane" role="tabpanel" aria-labelledby="qr-tab-paragraph">
+        <p className="qr-hint">
+          "点击页面中的段落，在这里查看完整原文与译文；也可以用 [ 和 ] 键前后切换段落。"
+  <footer className="qr-statusbar">
+    <span className="qr-status-path" title="D:/Papers">
+      "D:/Papers"
+    <span>
+      "快速省费"
+    <span>
+      "100%"
