@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   routeFor, complete, ReaderError, QUESTION_PROMPT, selectEvidence, validateTranslation,
@@ -16,7 +16,6 @@ export const inject = ['connection', 'llm', 'workspaceRegistry'];
 const ROUTE = '/api/dsh-quiet-reader';
 const PDF_LIMIT_MB = 40;
 const PDF_LIMIT = PDF_LIMIT_MB * 1024 * 1024;
-const require = createRequire(import.meta.url);
 const LAYOUT_VERSION = 16;
 
 function validBox(box) {
@@ -611,12 +610,9 @@ export function createReader(ctx, root) {
         headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
       });
     }
-    let library;
-    try {
-      library = dirname(require.resolve('pdfjs-dist/package.json'));
-    } catch {
-      throw new ReaderError('阅读器缺少 PDF 解析依赖，请重新安装插件。', 500);
-    }
+    // PDF.js is vendored with the plugin, so installation never downloads the
+    // 39 MB pdfjs-dist package from the registry.
+    const library = fileURLToPath(new URL('./vendor/pdfjs/', import.meta.url));
     if (name === 'pdf.mjs' || name === 'pdf.worker.mjs') {
       return new Response(await readFile(join(library, 'build', name)), {
         headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },

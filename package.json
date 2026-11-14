@@ -1,6 +1,6 @@
 {
   "name": "dsh-quiet-reader",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "阅藏：DeepSeek Harness 的双语论文阅读模式",
   "type": "module",
   "main": "./src/host.js",
@@ -23,7 +23,7 @@
   "bugs": {
     "url": "https://github.com/zhuyuhan327/dsh-translation-reader/issues"
   },
-  "dependencies": { "pdfjs-dist": "5.6.205" },
+
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {

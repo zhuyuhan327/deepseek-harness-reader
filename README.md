@@ -18,6 +18,8 @@
 - **工作区与文献树**：先选择根文件夹，每篇文献存入独立子目录；侧栏文献树支持展开、打开、清除译文与删除文献。
 ## 安装
 
+插件已内置 PDF 解析运行时（PDF.js），安装时无需再从 npm 下载约 39 MB 的依赖包；从 Release 安装通常几秒内完成。
+
 ### 方式一：下载 Release（推荐）
 
 从 [Releases](https://github.com/zhuyuhan327/dsh-translation-reader/releases/latest) 下载 `dsh-quiet-reader-<version>.tgz`，然后执行：
