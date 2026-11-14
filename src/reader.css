@@ -1,20 +1,35 @@
 .qr-reader {
   --qr-translation-font: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "DengXian", sans-serif;
-  /* DSH theme tokens: follow the host light/dark theme instead of the OS canvas colors. */
-  --qr-text: var(--dsw-alias-label-primary, CanvasText);
-  --qr-muted: var(--dsw-alias-label-secondary, GrayText);
-  --qr-bg: var(--dsw-alias-bg-base, Canvas);
-  --qr-surface: var(--dsw-alias-bg-layer-2, Canvas);
-  --qr-surface-hover: var(--dsw-alias-interactive-bg-hover, var(--qr-surface));
-  --qr-border: var(--dsw-alias-border-l2, GrayText);
-  --qr-accent: var(--dsw-alias-button-primary-fill, #385b47);
-  --qr-on-accent: var(--dsw-alias-label-primary-foreground, #fff);
+  /* Deterministic palettes: light by default, dark when Harness marks the body.
+     Harness resolves the "system" preference itself, so this follows the OS
+     setting whenever the user chose "跟随系统". */
+  --qr-text: #111;
+  --qr-muted: #444;
+  --qr-bg: #fff;
+  --qr-surface: #f5f5f5;
+  --qr-surface-hover: #e9e9e9;
+  --qr-border: #c9c9c9;
+  --qr-accent-bg: #dcebe3;
+  --qr-accent-border: #2f6b4b;
+  --qr-accent-text: #111;
   height: 100%;
   overflow: auto;
   padding: 24px;
   color: var(--qr-text);
   background: var(--qr-bg);
 }
+body[data-ds-dark-theme] .qr-reader {
+  --qr-text: #f2f2f2;
+  --qr-muted: #b0b0b0;
+  --qr-bg: #191919;
+  --qr-surface: #262626;
+  --qr-surface-hover: #333;
+  --qr-border: #4a4a4a;
+  --qr-accent-bg: #3d7a58;
+  --qr-accent-border: #3d7a58;
+  --qr-accent-text: #fff;
+}
+
 .qr-reader h1, .qr-reader h2, .qr-reader h3 { margin: 0; line-height: 1.35; }
 .qr-reader h1 { font-size: 22px; }
 .qr-reader h2 { font-size: 17px; margin: 18px 0 12px; overflow-wrap: anywhere; }
@@ -27,10 +42,11 @@
 }
 .qr-header, .qr-toolbar { justify-content: space-between; }
 .qr-toolbar { margin-bottom: 14px; }
-.qr-reader button, .qr-reader select, .qr-reader textarea {
+.qr-reader button, .qr-reader select, .qr-reader textarea, .qr-reader input {
   font: inherit;
-  color: var(--qr-text);
 }
+/* Keep control text readable even when the host stylesheet also targets buttons. */
+.qr-reader button, .qr-reader select, .qr-reader textarea, .qr-reader input { color: var(--qr-text) !important; }
 .qr-reader select { max-width: min(35vw, 360px); }
 .qr-reader button:not(.qr-source), .qr-reader select, .qr-reader textarea {
   background: var(--qr-surface);
@@ -41,8 +57,8 @@
 .qr-reader button:hover:not(:disabled):not(.qr-source) { background: var(--qr-surface-hover); }
 .qr-reader button:not(:disabled) { cursor: pointer; }
 .qr-reader button:disabled { opacity: .55; }
-.qr-reader .qr-primary { background: var(--qr-accent); border-color: var(--qr-accent); color: var(--qr-on-accent); }
-.qr-reader .qr-primary:hover:not(:disabled) { background: var(--qr-accent); }
+.qr-reader .qr-primary, .qr-reader .qr-primary:hover:not(:disabled) { background: var(--qr-accent-bg); border: 1px solid var(--qr-accent-border); color: var(--qr-accent-text); }
+
 .qr-reader :focus-visible { outline: 2px solid #799d79; outline-offset: 2px; }
 .qr-reader progress { width: 110px; accent-color: #385b47; }
 .qr-spread { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; width: 100%; }
